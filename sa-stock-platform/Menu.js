@@ -13,7 +13,7 @@
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("SA Platform")
-    .addItem("Initialize Project", "triggerInitializeProject")
+    .addItem("Initialize Project", "InitializeProject")
     .addSeparator()
     .addItem("Update Data", "triggerUpdateData")
     .addItem("Run Backtest (Placeholder)", "triggerRunBacktest")
@@ -25,14 +25,27 @@ function onOpen() {
 }
 
 /**
- * Custom UI button or action callback to initialize database sheets.
+ * Main global entry-point requested by the user.
+ * Initializes database sheets, applies custom colors/headers/formatting,
+ * and sets up standard fallback config states.
  */
-function triggerInitializeProject() {
+function InitializeProject() {
   try {
     MainOrchestrator.initializeProject();
-    SpreadsheetApp.getUi().alert("SA Stock Research Platform: Initialization Successful!\nAll required sheets created, styled, and loaded with defaults.");
+
+    // Attempt to show UI alert if run from the Sheets UI
+    try {
+      SpreadsheetApp.getUi().alert("SA Stock Research Platform: Initialization Successful!\nAll required sheets created, styled, and loaded with defaults.");
+    } catch (e) {
+      // Fallback to console logs if run from the GAS editor backend direct execution
+      console.log("SA Stock Research Platform: Initialization Successful! All required sheets created, styled, and loaded with defaults.");
+    }
   } catch (e) {
-    SpreadsheetApp.getUi().alert("Error during project initialization:\n" + e.message);
+    try {
+      SpreadsheetApp.getUi().alert("Error during project initialization:\n" + e.message);
+    } catch (uiErr) {
+      console.error("Error during project initialization: " + e.message);
+    }
   }
 }
 

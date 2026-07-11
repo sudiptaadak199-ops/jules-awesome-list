@@ -23,7 +23,7 @@ The project code is divided into modular, specialized files located within the `
 7. **`PlaceholderEngine.js`**
    - Houses the integration interface designs. Provides ready-to-plug skeletons and helper methods (e.g. robust stock-by-stock retry wrappers) to show how future analytic and data retrieval modules will hook cleanly into the architecture.
 8. **`Menu.js`**
-   - Binds platform execution routines to Google Sheets UI menu items ("SA Platform"), streamlining control and configuration workflows.
+   - Binds platform execution routines to Google Sheets UI menu items ("SA Platform"), streamlining control and configuration workflows, including the primary entry point `InitializeProject()`.
 9. **`Main.js`**
    - The core platform Orchestrator. Defines top-level workflows and wraps processes in error-resistant boundaries so that an individual stock error logs a neat warning block but *never* terminates the entire process execution.
 
@@ -55,29 +55,31 @@ Follow these steps to copy and deploy the platform inside your personal Google A
 
 ---
 
-## 🔑 Authorization Process
+## 🔑 Authorization & Initialization Process
 
-When running the platform workflows for the first time, Google requires you to grant security clearances to access the active spreadsheet:
+The setup process requires only one script execution:
 
-1. In the Google Sheets tab, refresh the page. After a few seconds, a custom menu option called **SA Platform** will appear on your top toolbar.
-2. Click on **SA Platform** ➔ **Initialize Project**.
-3. An **Authorization Required** dialog will pop up. Click **Continue**.
-4. Select your active Google Account.
-5. You may receive an "unverified app" screen. Click on **Advanced** (at the bottom) and choose **Go to Untitled project (unsafe)**.
-6. Review the requested permissions (accessing and managing spreadsheet sheets) and click **Allow**.
+1. Inside the Google Apps Script editor, locate the function selection toolbar dropdown at the top.
+2. Select **`InitializeProject`** from the dropdown.
+3. Click the **Run** button.
+4. An **Authorization Required** dialog will pop up. Click **Continue**.
+5. Select your active Google Account.
+6. Click on **Advanced** (at the bottom) and choose **Go to Untitled project (unsafe)**.
+7. Review the requested permissions (accessing and managing spreadsheet sheets) and click **Allow**.
+8. After authorization, the script will execute automatically, programmatically building and styling all required sheets.
+9. **Reload the Google Sheet tab in your browser.** A custom menu option called **SA Platform** will appear on your top toolbar!
 
 ---
 
-## 🚀 Initializing and Running the Project
+## 🚀 Running and Auto-Repairing the Project
 
-Now that the system is authorized, follow these simple control steps:
+Once the system is authorized, you can run all updates and repairs directly from the Sheets UI:
 
-1. **Perform Initial Setup:**
-   - Go to **SA Platform** ➔ **Initialize Project**.
-   - The platform will programmatically check for the existence of the required database sheets: `Dashboard`, `Settings`, `Stock Master`, `Historical Data`, `Reports`, `Logs`, and `Cache`. If any do not exist, it will create and style them.
-   - Once completed, you will receive a success popup alert.
+1. **Perform Self-Healing / Auto-Repair:**
+   - If you or a user accidentally deletes one of the required sheets (e.g., `Historical Data` or `Logs`), simply select **SA Platform** ➔ **Initialize Project** (or run `InitializeProject()` from the script editor).
+   - The platform will programmatically detect the missing sheets and automatically recreate and restyle them, while safely preserving data in all other sheets!
 
-2. **Run Data Updates (Mock Historical Appends):**
+2. **Run Data Updates:**
    - Select **SA Platform** ➔ **Update Data**.
    - The engine reads the active stock symbols listed inside the `Stock Master` sheet (preloaded with `"RELIANCE"` as an initial placeholder) and downloads dummy daily rows to the `Historical Data` sheet.
    - Any single symbol failures are logged beautifully, but the pipeline continues smoothly.

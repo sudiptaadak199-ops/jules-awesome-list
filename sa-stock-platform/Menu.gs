@@ -12,12 +12,12 @@
  * Builds and mounts the menu bar.
  */
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  const menuConfig = Config.MENU;
-  const menu = ui.createMenu(menuConfig.MAIN_TITLE);
+  var ui = SpreadsheetApp.getUi();
+  var menuConfig = Config.MENU;
+  var menu = ui.createMenu(menuConfig.MAIN_TITLE);
 
-  for (let i = 0; i < menuConfig.ITEMS.length; i++) {
-    const item = menuConfig.ITEMS[i];
+  for (var i = 0; i < menuConfig.ITEMS.length; i++) {
+    var item = menuConfig.ITEMS[i];
     if (item.separator) {
       menu.addSeparator();
     } else {
@@ -94,8 +94,8 @@ function triggerGenerateReport() {
  * Redirects UI focus straight to the System Settings sheet tab.
  */
 function triggerConfigureSettings() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
   if (sheet) {
     ss.setActiveSheet(sheet);
   } else {
@@ -107,8 +107,8 @@ function triggerConfigureSettings() {
  * Redirects UI focus straight to the System Logs sheet tab.
  */
 function triggerViewLogs() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(Config.SHEETS.LOGS);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(Config.SHEETS.LOGS);
   if (sheet) {
     ss.setActiveSheet(sheet);
   } else {

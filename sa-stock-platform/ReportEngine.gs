@@ -14,12 +14,12 @@ class ReportEngine {
    * @returns {string} Generated Report ID.
    */
   static compilePerformanceReport() {
-    const start = new Date().getTime();
-    return ErrorHandler.runSafe("ReportEngine.compilePerformanceReport", () => {
-      const reportId = `REP_${new Date().getTime()}`;
-      const now = new Date();
+    var start = new Date().getTime();
+    return ErrorHandler.runSafe("ReportEngine.compilePerformanceReport", function() {
+      var reportId = "REP_" + new Date().getTime();
+      var now = new Date();
 
-      const reportRow = [
+      var reportRow = [
         [reportId, now, "Consolidated Stock Analytics & Strategy Performance", "Success: Metrics compiled safely in Phase 1 structure.", "https://placeholder-link.com/report"]
       ];
 
@@ -34,8 +34,8 @@ class ReportEngine {
    * Placeholder interface representing dynamic visual chart insertion.
    */
   static renderDashboardCharts() {
-    const start = new Date().getTime();
-    return ErrorHandler.runSafe("ReportEngine.renderDashboardCharts", () => {
+    var start = new Date().getTime();
+    return ErrorHandler.runSafe("ReportEngine.renderDashboardCharts", function() {
       // Future charts creation and insertion logic resides here
       Logger.success("ReportEngine.renderDashboardCharts", new Date().getTime() - start);
       return true;
@@ -46,8 +46,8 @@ class ReportEngine {
    * Placeholder interface for generating AI-native summaries and insights.
    */
   static runAIResearchSummary() {
-    const start = new Date().getTime();
-    return ErrorHandler.runSafe("ReportEngine.runAIResearchSummary", () => {
+    var start = new Date().getTime();
+    return ErrorHandler.runSafe("ReportEngine.runAIResearchSummary", function() {
       // Future Gemini or OpenAI API research synthesis resides here
       Logger.success("ReportEngine.runAIResearchSummary", new Date().getTime() - start);
       return true;
@@ -58,16 +58,11 @@ class ReportEngine {
    * Placeholder interface representing Markdown generation for Obsidian notes export.
    */
   static exportToObsidianFormat() {
-    const start = new Date().getTime();
-    return ErrorHandler.runSafe("ReportEngine.exportToObsidianFormat", () => {
+    var start = new Date().getTime();
+    return ErrorHandler.runSafe("ReportEngine.exportToObsidianFormat", function() {
       // Future Drive API writing logic for Markdown files export resides here
       Logger.success("ReportEngine.exportToObsidianFormat", new Date().getTime() - start);
       return true;
     }, false);
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.ReportEngine = ReportEngine;
 }

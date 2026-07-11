@@ -18,7 +18,7 @@ class PlatformUtils {
       Utilities.sleep(ms);
     } catch (e) {
       // Fallback loop if script execution environment restricts sleep directly
-      const start = new Date().getTime();
+      var start = new Date().getTime();
       while (new Date().getTime() - start < ms) {
         // busy wait as emergency fallback
       }
@@ -31,11 +31,11 @@ class PlatformUtils {
    * @returns {string} Formatted string.
    */
   static formatDate(dateObj) {
-    const d = dateObj instanceof Date ? dateObj : new Date();
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
+    var d = dateObj instanceof Date ? dateObj : new Date();
+    var yyyy = d.getFullYear();
+    var mm = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    return yyyy + "-" + mm + "-" + dd;
   }
 
   /**
@@ -44,11 +44,11 @@ class PlatformUtils {
    * @returns {string} Formatted string.
    */
   static formatTime(dateObj) {
-    const d = dateObj instanceof Date ? dateObj : new Date();
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${hh}:${mm}:${ss}`;
+    var d = dateObj instanceof Date ? dateObj : new Date();
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mm = String(d.getMinutes()).padStart(2, "0");
+    var ss = String(d.getSeconds()).padStart(2, "0");
+    return hh + ":" + mm + ":" + ss;
   }
 
   /**
@@ -58,9 +58,12 @@ class PlatformUtils {
    * @param {number} backoffMs - Delay backoff to prevent API blockages.
    * @returns {any} Result of the action execution.
    */
-  static retry(action, maxAttempts = 3, backoffMs = 500) {
-    let lastError = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  static retry(action, maxAttempts, backoffMs) {
+    if (maxAttempts === undefined) maxAttempts = 3;
+    if (backoffMs === undefined) backoffMs = 500;
+
+    var lastError = null;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         return action();
       } catch (err) {
@@ -80,12 +83,7 @@ class PlatformUtils {
    */
   static toBool(val) {
     if (val === undefined || val === null) return false;
-    const s = String(val).toUpperCase().trim();
+    var s = String(val).toUpperCase().trim();
     return s === "TRUE" || s === "1" || s === "YES" || s === "Y";
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.PlatformUtils = PlatformUtils;
 }

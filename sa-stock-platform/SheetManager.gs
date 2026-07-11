@@ -21,10 +21,10 @@ class SheetManager {
    * Repairs missing sheets or repairs missing headers/formats without wiping existing data.
    */
   static initializeAllSheets() {
-    const ss = this.getActiveSpreadsheet();
-    const sheetDefs = Config.SHEETS_DEFINITION;
+    var ss = this.getActiveSpreadsheet();
+    var sheetDefs = Config.SHEETS_DEFINITION;
 
-    for (const sheetName in sheetDefs) {
+    for (var sheetName in sheetDefs) {
       this.ensureAndRepairSheet(ss, sheetName, sheetDefs[sheetName]);
     }
   }
@@ -37,8 +37,8 @@ class SheetManager {
    * @param {object} def - Definition from Config.
    */
   static ensureAndRepairSheet(ss, sheetName, def) {
-    let sheet = ss.getSheetByName(sheetName);
-    let newlyCreated = false;
+    var sheet = ss.getSheetByName(sheetName);
+    var newlyCreated = false;
 
     if (!sheet) {
       sheet = ss.insertSheet(sheetName);
@@ -55,17 +55,17 @@ class SheetManager {
 
     // Set professional column widths
     if (def.columnsWidths) {
-      for (let i = 0; i < def.columnsWidths.length; i++) {
+      for (var i = 0; i < def.columnsWidths.length; i++) {
         sheet.setColumnWidth(i + 1, def.columnsWidths[i]);
       }
     }
 
     // Format headers and default rows if needed
     if (def.headers) {
-      const currentHeaders = sheet.getLastRow() > 0 ? sheet.getRange(1, 1, 1, def.headers.length).getValues()[0] : [];
-      let headersMatch = true;
+      var currentHeaders = sheet.getLastRow() > 0 ? sheet.getRange(1, 1, 1, def.headers.length).getValues()[0] : [];
+      var headersMatch = true;
 
-      for (let i = 0; i < def.headers.length; i++) {
+      for (var i = 0; i < def.headers.length; i++) {
         if (String(currentHeaders[i]).trim() !== String(def.headers[i]).trim()) {
           headersMatch = false;
           break;
@@ -74,7 +74,7 @@ class SheetManager {
 
       // Overwrite/repair headers if they don't match or are empty
       if (!headersMatch || sheet.getLastRow() === 0) {
-        const headerRange = sheet.getRange(1, 1, 1, def.headers.length);
+        var headerRange = sheet.getRange(1, 1, 1, def.headers.length);
         headerRange.setValues([def.headers]);
         this.applyHeaderStyle(headerRange);
         sheet.setRowHeight(1, 28);
@@ -86,7 +86,7 @@ class SheetManager {
       if (sheetName === Config.SHEETS.DASHBOARD) {
         this.buildDashboardLayout(sheet);
       } else if (def.defaultRows && def.defaultRows.length > 0) {
-        const dataRange = sheet.getRange(2, 1, def.defaultRows.length, def.defaultRows[0].length);
+        var dataRange = sheet.getRange(2, 1, def.defaultRows.length, def.defaultRows[0].length);
         dataRange.setValues(def.defaultRows);
         this.applyBodyFormat(dataRange);
       }
@@ -125,7 +125,7 @@ class SheetManager {
     sheet.clear();
 
     // Title Section
-    const titleRange = sheet.getRange("B2:H2");
+    var titleRange = sheet.getRange("B2:H2");
     titleRange.merge()
               .setValue(Config.METADATA.NAME.toUpperCase())
               .setFontSize(Config.THEME.FONTS.SIZE_TITLE)
@@ -134,7 +134,7 @@ class SheetManager {
               .setFontFamily(Config.THEME.FONTS.FAMILY)
               .setHorizontalAlignment("center");
 
-    const subtitleRange = sheet.getRange("B3:H3");
+    var subtitleRange = sheet.getRange("B3:H3");
     subtitleRange.merge()
                  .setValue("Enterprise Backtesting & Quant Trading Hub • Foundation Release")
                  .setFontSize(Config.THEME.FONTS.SIZE_SUBTITLE)
@@ -144,7 +144,7 @@ class SheetManager {
                  .setHorizontalAlignment("center");
 
     // Documentation Container
-    const infoBox = sheet.getRange("B5:H9");
+    var infoBox = sheet.getRange("B5:H9");
     infoBox.merge()
            .setValue("PLATFORM INSTRUCTIONS:\n\n" +
                      "• Deploy operations directly via the custom spreadsheet menu 'SA Platform'.\n" +
@@ -180,9 +180,9 @@ class SheetManager {
    * @returns {Array<Array<any>>} Double array grid of data.
    */
   static batchRead(sheetName, r, c, rowsCount, colsCount) {
-    const ss = this.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+    var ss = this.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error("Operational sheet [" + sheetName + "] does not exist.");
     return sheet.getRange(r, c, rowsCount, colsCount).getValues();
   }
 
@@ -193,13 +193,15 @@ class SheetManager {
    * @param {number} r - Row index.
    * @param {number} c - Column index.
    */
-  static batchWrite(sheetName, values, r = 1, c = 1) {
+  static batchWrite(sheetName, values, r, c) {
+    if (r === undefined) r = 1;
+    if (c === undefined) c = 1;
     if (!values || values.length === 0) return;
-    const ss = this.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+    var ss = this.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error("Operational sheet [" + sheetName + "] does not exist.");
 
-    const range = sheet.getRange(r, c, values.length, values[0].length);
+    var range = sheet.getRange(r, c, values.length, values[0].length);
     range.setValues(values);
     this.applyBodyFormat(range);
   }
@@ -211,11 +213,11 @@ class SheetManager {
    */
   static batchAppend(sheetName, rows) {
     if (!rows || rows.length === 0) return;
-    const ss = this.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+    var ss = this.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error("Operational sheet [" + sheetName + "] does not exist.");
 
-    const startRow = sheet.getLastRow() + 1;
+    var startRow = sheet.getLastRow() + 1;
     this.batchWrite(sheetName, rows, startRow, 1);
   }
 
@@ -224,17 +226,12 @@ class SheetManager {
    * @param {string} sheetName - Target sheet tab.
    */
   static clearDataBelowHeaders(sheetName) {
-    const ss = this.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(sheetName);
+    var ss = this.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(sheetName);
     if (!sheet) return;
-    const lastRow = sheet.getLastRow();
+    var lastRow = sheet.getLastRow();
     if (lastRow > 1) {
       sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
     }
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.SheetManager = SheetManager;
 }

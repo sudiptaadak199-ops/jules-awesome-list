@@ -20,7 +20,8 @@ class Logger {
    * @param {string} functionName - Scope function.
    * @param {number} durationMs - Spent time in ms.
    */
-  static success(functionName, durationMs = 0) {
+  static success(functionName, durationMs) {
+    if (durationMs === undefined) durationMs = 0;
     this.appendEntry(functionName, "SUCCESS", durationMs, "");
   }
 
@@ -30,7 +31,9 @@ class Logger {
    * @param {number} durationMs - Spent time in ms.
    * @param {string} warningMsg - Custom diagnostic context.
    */
-  static warning(functionName, durationMs = 0, warningMsg = "") {
+  static warning(functionName, durationMs, warningMsg) {
+    if (durationMs === undefined) durationMs = 0;
+    if (warningMsg === undefined) warningMsg = "";
     this.appendEntry(functionName, "WARNING", durationMs, warningMsg);
   }
 
@@ -40,10 +43,12 @@ class Logger {
    * @param {number} durationMs - Spent time in ms.
    * @param {string|Error} err - Error object or string message.
    */
-  static error(functionName, durationMs = 0, err = "") {
-    let errorMsg = "";
+  static error(functionName, durationMs, err) {
+    if (durationMs === undefined) durationMs = 0;
+    if (err === undefined) err = "";
+    var errorMsg = "";
     if (err instanceof Error) {
-      errorMsg = `${err.message} | Stack: ${err.stack}`;
+      errorMsg = err.message + " | Stack: " + err.stack;
     } else {
       errorMsg = String(err);
     }
@@ -57,14 +62,15 @@ class Logger {
    * @param {number} durationMs - Process length.
    * @param {string} description - Detail context.
    */
-  static appendEntry(functionName, status, durationMs, description = "") {
+  static appendEntry(functionName, status, durationMs, description) {
+    if (description === undefined) description = "";
     if (!this._buffer) {
       this.init();
     }
 
-    const now = new Date();
-    const dateStr = PlatformUtils.formatDate(now);
-    const timeStr = PlatformUtils.formatTime(now);
+    var now = new Date();
+    var dateStr = PlatformUtils.formatDate(now);
+    var timeStr = PlatformUtils.formatTime(now);
 
     this._buffer.push([
       dateStr,
@@ -77,7 +83,7 @@ class Logger {
 
     // Stackdriver integration if system debug setting is enabled
     if (Settings.getBool("Debug Mode", false)) {
-      const consoleMsg = `[SA PLATFORM LOG] [${status}] ${functionName} (${durationMs}ms) - ${description || "OK"}`;
+      var consoleMsg = "[SA PLATFORM LOG] [" + status + "] " + functionName + " (" + durationMs + "ms) - " + (description || "OK");
       if (status === "ERROR") {
         console.error(consoleMsg);
       } else if (status === "WARNING") {
@@ -110,9 +116,4 @@ class Logger {
   static clear() {
     this._buffer = [];
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.Logger = Logger;
 }

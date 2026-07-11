@@ -16,19 +16,20 @@ class ErrorHandler {
    * @param {any} fallbackValue - Value to return if execution fails.
    * @returns {any} Result of the delegate or the fallback value.
    */
-  static runSafe(scopeName, delegate, fallbackValue = null) {
-    const start = new Date().getTime();
+  static runSafe(scopeName, delegate, fallbackValue) {
+    if (fallbackValue === undefined) fallbackValue = null;
+    var start = new Date().getTime();
     try {
       return delegate();
     } catch (e) {
-      const elapsed = new Date().getTime() - start;
-      const parsedError = this.parse(e);
+      var elapsed = new Date().getTime() - start;
+      var parsedError = this.parse(e);
 
       // Attempt to append to Logger
       try {
         Logger.error(scopeName, elapsed, parsedError.message);
       } catch (logErr) {
-        console.error(`ErrorHandler Logger bypass for [${scopeName}]: ${parsedError.message}. Logger error: ${logErr.message}`);
+        console.error("ErrorHandler Logger bypass for [" + scopeName + "]: " + parsedError.message + ". Logger error: " + logErr.message);
       }
 
       return fallbackValue;
@@ -62,10 +63,10 @@ class ErrorHandler {
    * @param {any} err - Error object.
    */
   static displayUserAlert(context, err) {
-    const info = this.parse(err);
-    const friendlyMessage = `An operation error occurred: ${context}\n\n` +
-                            `Details: ${info.message}\n\n` +
-                            `Please review the System Logs sheet for details and diagnosis.`;
+    var info = this.parse(err);
+    var friendlyMessage = "An operation error occurred: " + context + "\n\n" +
+                          "Details: " + info.message + "\n\n" +
+                          "Please review the System Logs sheet for details and diagnosis.";
     try {
       SpreadsheetApp.getUi().alert("SA Platform Warning", friendlyMessage, SpreadsheetApp.getUi().ButtonSet.OK);
     } catch (uiErr) {
@@ -73,9 +74,4 @@ class ErrorHandler {
       console.warn("User alert bypassed (No UI context): " + friendlyMessage);
     }
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.ErrorHandler = ErrorHandler;
 }

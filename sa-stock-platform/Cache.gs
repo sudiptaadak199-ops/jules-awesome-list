@@ -20,21 +20,21 @@ class Cache {
     }
 
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.CACHE);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.CACHE);
       if (!sheet) return null;
 
-      const lastRow = sheet.getLastRow();
+      var lastRow = sheet.getLastRow();
       if (lastRow <= 1) return null;
 
-      const data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
-      const now = new Date().getTime();
+      var data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      var now = new Date().getTime();
 
-      for (let i = 0; i < data.length; i++) {
-        const cachedKey = String(data[i][0]).trim();
+      for (var i = 0; i < data.length; i++) {
+        var cachedKey = String(data[i][0]).trim();
         if (cachedKey === key) {
-          const val = data[i][1];
-          const expTime = new Date(data[i][2]).getTime();
+          var val = data[i][1];
+          var expTime = new Date(data[i][2]).getTime();
 
           if (expTime > now) {
             return String(val);
@@ -47,7 +47,7 @@ class Cache {
       }
     } catch (e) {
       if (Settings.getBool("Debug Mode", false)) {
-        console.error(`Cache read operation failure for [${key}]: ${e.message}`);
+        console.error("Cache read operation failure for [" + key + "]: " + e.message);
       }
     }
     return null;
@@ -59,25 +59,26 @@ class Cache {
    * @param {any} value - Cache payload.
    * @param {number} ttlMinutes - Expiration threshold in minutes.
    */
-  static put(key, value, ttlMinutes = 60) {
+  static put(key, value, ttlMinutes) {
+    if (ttlMinutes === undefined) ttlMinutes = 60;
     if (!Settings.getBool("Cache Enabled", true)) {
       return;
     }
 
-    const payload = typeof value === "object" ? JSON.stringify(value) : String(value);
-    const expiration = new Date(new Date().getTime() + ttlMinutes * 60 * 1000);
+    var payload = typeof value === "object" ? JSON.stringify(value) : String(value);
+    var expiration = new Date(new Date().getTime() + ttlMinutes * 60 * 1000);
 
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.CACHE);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.CACHE);
       if (!sheet) return;
 
-      const lastRow = sheet.getLastRow();
-      let found = false;
+      var lastRow = sheet.getLastRow();
+      var found = false;
 
       if (lastRow > 1) {
-        const keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-        for (let i = 0; i < keys.length; i++) {
+        var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+        for (var i = 0; i < keys.length; i++) {
           if (String(keys[i][0]).trim() === key) {
             sheet.getRange(i + 2, 2, 1, 2).setValues([[payload, expiration]]);
             found = true;
@@ -91,7 +92,7 @@ class Cache {
       }
     } catch (e) {
       if (Settings.getBool("Debug Mode", false)) {
-        console.error(`Cache write operation failure for [${key}]: ${e.message}`);
+        console.error("Cache write operation failure for [" + key + "]: " + e.message);
       }
     }
   }
@@ -102,15 +103,15 @@ class Cache {
    */
   static remove(key) {
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.CACHE);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.CACHE);
       if (!sheet) return;
 
-      const lastRow = sheet.getLastRow();
+      var lastRow = sheet.getLastRow();
       if (lastRow <= 1) return;
 
-      const keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-      for (let i = 0; i < keys.length; i++) {
+      var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (var i = 0; i < keys.length; i++) {
         if (String(keys[i][0]).trim() === key) {
           sheet.deleteRow(i + 2);
           break;
@@ -118,7 +119,7 @@ class Cache {
       }
     } catch (e) {
       if (Settings.getBool("Debug Mode", false)) {
-        console.error(`Cache removal operation failure for [${key}]: ${e.message}`);
+        console.error("Cache removal operation failure for [" + key + "]: " + e.message);
       }
     }
   }
@@ -128,26 +129,26 @@ class Cache {
    */
   static purgeExpired() {
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.CACHE);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.CACHE);
       if (!sheet) return;
 
-      const lastRow = sheet.getLastRow();
+      var lastRow = sheet.getLastRow();
       if (lastRow <= 1) return;
 
-      const data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
-      const now = new Date().getTime();
+      var data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      var now = new Date().getTime();
 
       // Scan backwards to maintain row index alignment during deletion
-      for (let i = data.length - 1; i >= 0; i--) {
-        const expirationTime = new Date(data[i][2]).getTime();
+      for (var i = data.length - 1; i >= 0; i--) {
+        var expirationTime = new Date(data[i][2]).getTime();
         if (expirationTime <= now) {
           sheet.deleteRow(i + 2);
         }
       }
     } catch (e) {
       if (Settings.getBool("Debug Mode", false)) {
-        console.error(`Cache sweep purge operation failure: ${e.message}`);
+        console.error("Cache sweep purge operation failure: " + e.message);
       }
     }
   }
@@ -164,9 +165,4 @@ class Cache {
       }
     }
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.Cache = Cache;
 }

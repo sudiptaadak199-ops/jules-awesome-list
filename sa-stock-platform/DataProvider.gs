@@ -15,21 +15,21 @@ class DataProvider {
    * @returns {object} Standardized result object with status, records, and analytics.
    */
   static fetchAndStoreStockData(symbol) {
-    const start = new Date().getTime();
-    const retryCount = Settings.getNum("Retry Count", 3);
-    const delay = Settings.getNum("Request Delay", 500);
-    const source = Settings.get("Data Source", "Yahoo Finance");
+    var start = new Date().getTime();
+    var retryCount = Settings.getNum("Retry Count", 3);
+    var delay = Settings.getNum("Request Delay", 500);
+    var source = Settings.get("Data Source", "Yahoo Finance");
 
-    return ErrorHandler.runSafe(`DataProvider.fetchAndStoreStockData[${symbol}]`, () => {
+    return ErrorHandler.runSafe("DataProvider.fetchAndStoreStockData[" + symbol + "]", function() {
       // Simulate external delay to respect rate limit margins
       PlatformUtils.sleep(delay);
 
       // Wrapper to fetch stock using PlatformUtils retry mechanism
-      const rawRecords = PlatformUtils.retry(() => {
-        return this.fetchFromFeed(symbol, source);
+      var rawRecords = PlatformUtils.retry(function() {
+        return DataProvider.fetchFromFeed(symbol, source);
       }, retryCount, 300);
 
-      const elapsed = new Date().getTime() - start;
+      var elapsed = new Date().getTime() - start;
       return {
         symbol: symbol,
         status: "SUCCESS",
@@ -51,7 +51,7 @@ class DataProvider {
       throw new Error("Simulated feed response failure (Rate limit exceeded / Timeout).");
     }
 
-    const todayStr = PlatformUtils.formatDate(new Date());
+    var todayStr = PlatformUtils.formatDate(new Date());
 
     // Simulate Yahoo Finance data mapping structure
     if (source === "Yahoo Finance") {
@@ -72,9 +72,4 @@ class DataProvider {
       [symbol, todayStr, 100.00, 105.00, 99.00, 104.00, 104.00, 100000, "Default Engine", new Date()]
     ];
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.DataProvider = DataProvider;
 }

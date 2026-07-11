@@ -15,27 +15,27 @@ class Settings {
   static init() {
     this._cache = {};
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
 
       if (!sheet) {
         this.loadFromDefaults();
         return;
       }
 
-      const lastRow = sheet.getLastRow();
+      var lastRow = sheet.getLastRow();
       if (lastRow <= 1) {
         this.repairAllSettings(sheet);
         return;
       }
 
       // Read current values
-      const data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
-      const currentKeys = {};
+      var data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      var currentKeys = {};
 
-      for (let i = 0; i < data.length; i++) {
-        const key = String(data[i][0]).trim();
-        const value = String(data[i][1]).trim();
+      for (var i = 0; i < data.length; i++) {
+        var key = String(data[i][0]).trim();
+        var value = String(data[i][1]).trim();
         if (key) {
           this._cache[key] = value;
           currentKeys[key] = true;
@@ -43,15 +43,15 @@ class Settings {
       }
 
       // Check for missing keys against Config defaults to trigger self-healing
-      let repairNeeded = false;
-      const defaults = Config.DEFAULT_SETTINGS;
-      for (let i = 1; i < defaults.length; i++) {
-        const defaultKey = defaults[i][0];
+      var repairNeeded = false;
+      var defaults = Config.DEFAULT_SETTINGS;
+      for (var i = 1; i < defaults.length; i++) {
+        var defaultKey = defaults[i][0];
         if (!currentKeys[defaultKey]) {
           repairNeeded = true;
           this._cache[defaultKey] = defaults[i][1];
           // Append the missing key row
-          const nowStr = PlatformUtils.formatDate(new Date());
+          var nowStr = PlatformUtils.formatDate(new Date());
           sheet.appendRow([defaultKey, defaults[i][1], defaults[i][2], nowStr]);
         }
       }
@@ -71,11 +71,11 @@ class Settings {
    */
   static repairAllSettings(sheet) {
     this.loadFromDefaults();
-    const rows = [];
-    const defaults = Config.DEFAULT_SETTINGS;
-    const nowStr = PlatformUtils.formatDate(new Date());
+    var rows = [];
+    var defaults = Config.DEFAULT_SETTINGS;
+    var nowStr = PlatformUtils.formatDate(new Date());
 
-    for (let i = 1; i < defaults.length; i++) {
+    for (var i = 1; i < defaults.length; i++) {
       rows.push([defaults[i][0], defaults[i][1], defaults[i][2], nowStr]);
     }
 
@@ -89,8 +89,8 @@ class Settings {
    */
   static loadFromDefaults() {
     this._cache = {};
-    const defaults = Config.DEFAULT_SETTINGS;
-    for (let i = 1; i < defaults.length; i++) {
+    var defaults = Config.DEFAULT_SETTINGS;
+    for (var i = 1; i < defaults.length; i++) {
       this._cache[defaults[i][0]] = defaults[i][1];
     }
   }
@@ -101,7 +101,8 @@ class Settings {
    * @param {any} defaultValue - Fallback.
    * @returns {string} String configuration.
    */
-  static get(key, defaultValue = "") {
+  static get(key, defaultValue) {
+    if (defaultValue === undefined) defaultValue = "";
     if (!this._cache || Object.keys(this._cache).length === 0) {
       this.init();
     }
@@ -114,8 +115,9 @@ class Settings {
    * @param {number} defaultValue - Fallback.
    * @returns {number}
    */
-  static getNum(key, defaultValue = 0) {
-    const val = parseFloat(this.get(key));
+  static getNum(key, defaultValue) {
+    if (defaultValue === undefined) defaultValue = 0;
+    var val = parseFloat(this.get(key));
     return isNaN(val) ? defaultValue : val;
   }
 
@@ -125,7 +127,8 @@ class Settings {
    * @param {boolean} defaultValue - Fallback.
    * @returns {boolean}
    */
-  static getBool(key, defaultValue = false) {
+  static getBool(key, defaultValue) {
+    if (defaultValue === undefined) defaultValue = false;
     return PlatformUtils.toBool(this.get(key, defaultValue));
   }
 
@@ -141,17 +144,17 @@ class Settings {
     this._cache[key] = String(value);
 
     try {
-      const ss = SheetManager.getActiveSpreadsheet();
-      const sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
+      var ss = SheetManager.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
       if (!sheet) return;
 
-      const lastRow = sheet.getLastRow();
-      let found = false;
+      var lastRow = sheet.getLastRow();
+      var found = false;
 
       if (lastRow > 1) {
-        const range = sheet.getRange(2, 1, lastRow - 1, 2);
-        const data = range.getValues();
-        for (let i = 0; i < data.length; i++) {
+        var range = sheet.getRange(2, 1, lastRow - 1, 2);
+        var data = range.getValues();
+        for (var i = 0; i < data.length; i++) {
           if (String(data[i][0]).trim() === key) {
             sheet.getRange(i + 2, 2, 1, 3).setValues([[String(value), "Updated on flow runtime.", PlatformUtils.formatDate(new Date())]]);
             found = true;
@@ -164,12 +167,7 @@ class Settings {
         sheet.appendRow([key, String(value), "Dynamic runtime key addition.", PlatformUtils.formatDate(new Date())]);
       }
     } catch (e) {
-      // safe fallback for mock unit tests
+      // safe fallback
     }
   }
-}
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.Settings = Settings;
 }

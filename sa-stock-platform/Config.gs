@@ -7,7 +7,7 @@
  * and defaults. This ensures ZERO hard-coding in functional modules.
  */
 
-const Config = {
+var Config = {
   // System metadata
   METADATA: {
     NAME: "SA Stock Research & Backtest Platform",
@@ -124,8 +124,3 @@ const Config = {
     }
   }
 };
-
-// Export to Node environment for local CI/CD testing
-if (typeof exports !== 'undefined') {
-  exports.Config = Config;
-}

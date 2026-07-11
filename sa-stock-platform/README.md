@@ -1,6 +1,6 @@
 # SA Stock Research & Backtest Platform (Phase 1 - Foundation)
 
-Welcome to the **SA Stock Research & Backtest Platform**! This is the Phase 1 Foundation release. This codebase establishes a clean, high-performance, modular architectural backbone on top of Google Sheets using Google Apps Script (GAS) to power professional stock analytics and automated backtesting platforms.
+Welcome to the **SA Stock Research & Backtest Platform**! This is the Phase 1 Foundation release. This codebase establishes an enterprise-grade, high-performance, modular architectural backbone on top of Google Sheets using Google Apps Script (GAS) to power professional stock analytics, data feeds, strategy metrics, and backtesting simulations.
 
 ---
 
@@ -11,25 +11,33 @@ The project code is divided into modular, specialized files located within the `
 1. **`appsscript.json`**
    - The manifest file declaring runtime metadata, timezone (`Asia/Kolkata`), and required standard execution scopes.
 2. **`Config.js`**
-   - Central repository for constants, active sheets naming, a curated "Cool Tech Theme" professional color palette, and default fallback system settings.
-3. **`SheetManager.js`**
+   - Central repository for constants, active sheets naming, a curated "Cool Tech Theme" professional color palette, and default fallback system settings. **Zero Hardcoding.**
+3. **`Utilities.js`**
+   - Safe utility helpers, date string formatters, and custom retry runners to encapsulate single responsibilities.
+4. **`ErrorHandler.js`**
+   - Decoupled error handler for classifying, wrapping, and reporting errors so we never stop execution because of a single stock failure.
+5. **`SheetManager.js`**
    - The spreadsheet operations controller. It manages auto-creation of database sheets, professional column styling, frozen header boundaries, and batch read/write blocks to minimize spreadsheet interactions and ensure optimal execution speed.
-4. **`Settings.js`**
+6. **`Settings.js`**
    - A robust configuration loading layer. Loads settings from the `Settings` sheet, caches them in run-time execution memory to prevent recurring read-overhead, and supports type-safe parsed getters (`getNum()`, `getBool()`) and live cell-targeted setting overrides.
-5. **`Logger.js`**
+7. **`Logger.js`**
    - A highly performant structured execution logger. Keeps track of running execution statistics (function names, status, duration, errors) and buffers logs locally, flushing them onto the spreadsheet database in a single high-efficiency bulk operation upon completion.
-6. **`Cache.js`**
+8. **`Cache.js`**
    - A reusable, persistent sheet-backed key-value cache system complete with configurable TTL (Time to Live) expiration controls. Ideal for caching high-latency stock API response footprints. Bypasses automatically if caching is disabled.
-7. **`PlaceholderEngine.js`**
-   - Houses the integration interface designs. Provides ready-to-plug skeletons and helper methods (e.g. robust stock-by-stock retry wrappers) to show how future analytic and data retrieval modules will hook cleanly into the architecture.
-8. **`Menu.js`**
-   - Binds platform execution routines to Google Sheets UI menu items ("SA Platform"), streamlining control and configuration workflows, including the primary entry point `InitializeProject()`.
-9. **`Main.js`**
-   - The core platform Orchestrator. Defines top-level workflows and wraps processes in error-resistant boundaries so that an individual stock error logs a neat warning block but *never* terminates the entire process execution.
+9. **`DataProvider.js`**
+   - A decoupled market data ingestion provider, outlining complete Yahoo Finance and NSE India ingestion paths.
+10. **`StrategyEngine.js`**
+    - Analytical strategy executor for Moving Averages, breakout patterns, CPR, Pivot Points, and multi-timeframe analysis.
+11. **`ReportEngine.js`**
+    - Reporting suite managing dynamic performance metrics compilation, dashboard charts rendering, AI analysis summaries, and Markdown exporting for Obsidian.
+12. **`Menu.js`**
+    - Binds platform execution routines to Google Sheets UI menu items ("SA Platform"), streamlining control and configuration workflows, including the primary entry point `InitializeProject()`.
+13. **`Main.js`**
+    - The core platform Orchestrator. Defines top-level workflows and wraps processes in error-resistant boundaries so that an individual stock error logs a neat warning block but *never* terminates the entire process execution.
 
 ---
 
-## 🛠️ Step-by-Step Installation Guide
+## 🛠️ Step-by-Step Copy-Paste Installation Guide
 
 Follow these steps to copy and deploy the platform inside your personal Google Account:
 
@@ -43,13 +51,17 @@ Follow these steps to copy and deploy the platform inside your personal Google A
 
 ### Step 3: Copy the Files
 1. By default, you will see a single file named `Code.gs`. Rename it to `Main.gs` and replace its contents with the code inside `sa-stock-platform/Main.js`.
-2. Create seven (7) more script files in the editor sidebar (by clicking the **`+`** icon and choosing **Script**):
+2. Create ten (10) more script files in the editor sidebar (by clicking the **`+`** icon and choosing **Script**):
    - `Config` (Paste contents of `sa-stock-platform/Config.js`)
+   - `Utilities` (Paste contents of `sa-stock-platform/Utilities.js`)
+   - `ErrorHandler` (Paste contents of `sa-stock-platform/ErrorHandler.js`)
    - `SheetManager` (Paste contents of `sa-stock-platform/SheetManager.js`)
    - `Settings` (Paste contents of `sa-stock-platform/Settings.js`)
    - `Logger` (Paste contents of `sa-stock-platform/Logger.js`)
    - `Cache` (Paste contents of `sa-stock-platform/Cache.js`)
-   - `PlaceholderEngine` (Paste contents of `sa-stock-platform/PlaceholderEngine.js`)
+   - `DataProvider` (Paste contents of `sa-stock-platform/DataProvider.js`)
+   - `StrategyEngine` (Paste contents of `sa-stock-platform/StrategyEngine.js`)
+   - `ReportEngine` (Paste contents of `sa-stock-platform/ReportEngine.js`)
    - `Menu` (Paste contents of `sa-stock-platform/Menu.js`)
 3. Save the script project by clicking the **Save Project** (floppy disk) icon or pressing `Ctrl + S` / `Cmd + S`.
 
@@ -76,20 +88,20 @@ The setup process requires only one script execution:
 Once the system is authorized, you can run all updates and repairs directly from the Sheets UI:
 
 1. **Perform Self-Healing / Auto-Repair:**
-   - If you or a user accidentally deletes one of the required sheets (e.g., `Historical Data` or `Logs`), simply select **SA Platform** ➔ **Initialize Project** (or run `InitializeProject()` from the script editor).
+   - If you or a user accidentally deletes one of the required sheets (e.g., `Historical Data` or `Logs`), simply select **SA Platform** ➔ **Initialize / Repair Project** (or run `InitializeProject()` from the script editor).
    - The platform will programmatically detect the missing sheets and automatically recreate and restyle them, while safely preserving data in all other sheets!
 
 2. **Run Data Updates:**
-   - Select **SA Platform** ➔ **Update Data**.
-   - The engine reads the active stock symbols listed inside the `Stock Master` sheet (preloaded with `"RELIANCE"` as an initial placeholder) and downloads dummy daily rows to the `Historical Data` sheet.
+   - Select **SA Platform** ➔ **Update Data Engine**.
+   - The engine reads the active stock symbols listed inside the `Stock Master` sheet (preloaded with `"RELIANCE"`, `"TCS"`, and `"INFY"` as initial placeholders) and downloads dummy daily rows to the `Historical Data` sheet.
    - Any single symbol failures are logged beautifully, but the pipeline continues smoothly.
 
 3. **Explore System Settings:**
-   - Click on **SA Platform** ➔ **Configure Settings** to navigate immediately to the `Settings` sheet.
+   - Click on **SA Platform** ➔ **Configure System Settings** to navigate immediately to the `Settings` sheet.
    - You can toggle system features like enabling/disabling caching (`Cache Enabled`), enabling debugging traces (`Debug Mode`), or tweaking batch size performance ranges.
 
 4. **Review System Diagnostics:**
-   - Click on **SA Platform** ➔ **View Logs** to view execution logs, containing precise durations and exit statuses for every routine.
+   - Click on **SA Platform** ➔ **View System Logs** to view execution logs, containing precise durations and exit statuses for every routine.
 
 ---
 
@@ -104,7 +116,7 @@ Every programmatically built sheet comes pre-styled with a professional **Cool T
 This Phase 1 release is designed for extensibility. Future analytics engines can be written as lightweight classes and plugged into the main framework:
 
 ### Hooking up the "NSE Data Engine"
-To transition from Yahoo Finance mock logs to active NSE live fetching, you only need to update the fetching module. Inside `PlaceholderEngine.processStockData()`, replace the standard Mock sleep timer block with:
+To transition from Yahoo Finance mock logs to active NSE live fetching, you only need to update the fetching module. Inside `DataProvider.fetchFromFeed()`, replace the standard Mock sleep timer block with:
 ```javascript
 const response = UrlFetchApp.fetch(`https://api.nseindia.com/api/historical/cm/equity?symbol=${symbol}`);
 const jsonData = JSON.parse(response.getContentText());

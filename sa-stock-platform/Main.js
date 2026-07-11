@@ -1,30 +1,29 @@
 /**
  * SA Stock Research & Backtest Platform - Phase 1 (Foundation)
  *
- * Main Platform Orchestrator
+ * Central Enterprise Orchestrator
  *
- * Provides structural orchestration, modular coordination, and robust error boundaries.
- * Wraps individual sub-routines (e.g. stock-by-stock updating) so that individual stock
- * failures log cleanly but never cause the entire process run to crash.
+ * Manages full lifecycle initialization, high-performance batch updates,
+ * and robust task boundaries. Implements complete self-healing on execution.
  */
 
 class MainOrchestrator {
   /**
-   * Safe entry-point for platform schema setup.
+   * Initializes and repairs all platform databases, structural parameters, and settings.
    */
   static initializeProject() {
     const start = new Date().getTime();
     try {
-      // Create all sheets
+      // 1. Core structural creation & auto-repair styling
       SheetManager.initializeAllSheets();
 
-      // Initialize system components
+      // 2. Initialize cached systems
       Settings.init();
       Logger.init();
 
-      Logger.success("MainOrchestrator.initializeProject", new Date().getTime() - start);
+      const elapsed = new Date().getTime() - start;
+      Logger.success("MainOrchestrator.initializeProject", elapsed);
     } catch (e) {
-      // In worst-case sheet creation blocks, dump logs to standard logger
       Logger.init();
       Logger.error("MainOrchestrator.initializeProject", new Date().getTime() - start, e);
       throw e;
@@ -34,99 +33,110 @@ class MainOrchestrator {
   }
 
   /**
-   * Orchestrates high-performance updating of Stock historical tables.
-   * Reads stock master, chunks execution in batches, runs placeholder engines,
-   * handles individual errors gracefully, and registers professional metrics.
+   * Orchestrates high-performance data ingestion across master listings.
+   * Leverages batch reads, safe stock boundaries, chunked iterations, and registers statistics.
+   * Optimized: accumulates historical rows and updates Stock Master in memory to execute exactly
+   * ONE batch append and ONE batch write back to the sheet.
    */
   static updateData() {
     const start = new Date().getTime();
 
-    // Safety check initialization
+    // Perform safety self-healing check on start to make sure structure is intact
+    this.initializeProject();
+
     Settings.init();
     Logger.init();
 
     try {
-      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const ss = SheetManager.getActiveSpreadsheet();
       const masterSheet = ss.getSheetByName(Config.SHEETS.STOCK_MASTER);
 
       if (!masterSheet) {
-        throw new Error("Stock Master sheet not initialized. Please run project initialization.");
+        throw new Error("Critical: Stock Master sheet is missing or corrupted. Run Initialize Project first.");
       }
 
       const lastRow = masterSheet.getLastRow();
       if (lastRow <= 1) {
-        Logger.log("MainOrchestrator.updateData", "WARNING", 0, "No active stock listings found in Stock Master.");
+        Logger.warning("MainOrchestrator.updateData", 0, "No active stocks found inside Stock Master sheet.");
         return;
       }
 
-      // Read all active stock listings in batch (minimize Spreadsheet API queries)
-      const data = masterSheet.getRange(2, 1, lastRow - 1, 6).getValues();
+      // Batch Read active stock listings in exactly one spreadsheet call
+      const masterData = masterSheet.getRange(2, 1, lastRow - 1, 8).getValues();
       const activeSymbols = [];
-      const rowMapping = []; // Tracks index back to the master list row for status updating
+      const localIndices = []; // Tracks index inside masterData array
 
-      for (let i = 0; i < data.length; i++) {
-        const symbol = String(data[i][0]).trim();
-        const status = String(data[i][5]).trim();
+      for (let i = 0; i < masterData.length; i++) {
+        const symbol = String(masterData[i][0]).trim();
+        const status = String(masterData[i][5]).trim();
         if (symbol && status.toUpperCase() === "ACTIVE") {
           activeSymbols.push(symbol);
-          rowMapping.push(i + 2); // Row index in Stock Master sheet
+          localIndices.push(i);
         }
       }
 
       if (activeSymbols.length === 0) {
-        Logger.log("MainOrchestrator.updateData", "WARNING", 0, "All stock listings are marked as inactive.");
+        Logger.warning("MainOrchestrator.updateData", 0, "All listed symbols inside Stock Master are marked inactive.");
         return;
       }
 
       const batchSize = Settings.getNum("Batch Size", 100);
-      const updateStatuses = [];
+      const accumulatedHistoricalRows = [];
 
-      // Loop through stock symbols in chunks/batches
+      // Process in chunked iterations to optimize memory usage bounds
       for (let i = 0; i < activeSymbols.length; i += batchSize) {
         const chunkSymbols = activeSymbols.slice(i, i + batchSize);
-        const chunkRows = rowMapping.slice(i, i + batchSize);
+        const chunkIndices = localIndices.slice(i, i + batchSize);
 
         for (let j = 0; j < chunkSymbols.length; j++) {
           const symbol = chunkSymbols[j];
-          const rowNum = chunkRows[j];
+          const dataIndex = chunkIndices[j];
           const stockStart = new Date().getTime();
 
+          // Individual stock boundary wrapper: single stock failure never terminates execution
           try {
-            // Process individual stock - failure inside does NOT stop others
-            const result = PlaceholderEngine.processStockData(symbol);
+            const result = DataProvider.fetchAndStoreStockData(symbol);
 
-            // Mark last processed time in Stock Master in memory buffer
-            updateStatuses.push({
-              row: rowNum,
-              timestamp: new Date(),
-              status: result.status
-            });
+            // Accumulate historical rows in memory
+            if (result.status === "SUCCESS" && result.records && result.records.length > 0) {
+              for (const record of result.records) {
+                accumulatedHistoricalRows.push(record);
+              }
+            }
+
+            // Update local memory data matrix
+            masterData[dataIndex][6] = new Date(); // Col 7 is Last Processed (index 6)
 
           } catch (individualError) {
-            // Strong error boundary: Keep the loop moving
-            const duration = new Date().getTime() - stockStart;
-            Logger.error(`MainOrchestrator.updateData[${symbol}]`, duration, individualError);
-            updateStatuses.push({
-              row: rowNum,
-              timestamp: new Date(),
-              status: "ERROR"
-            });
+            const stockElapsed = new Date().getTime() - stockStart;
+            Logger.error(`MainOrchestrator.updateData[${symbol}]`, stockElapsed, individualError);
           }
         }
       }
 
-      // Batch write the processing updates back to Stock Master to keep it fast
-      for (const stat of updateStatuses) {
-        masterSheet.getRange(stat.row, 7, 1, 1).setValue(stat.timestamp);
+      // Performance Optimization 1: Write all accumulated historical rows in exactly ONE batch call
+      if (accumulatedHistoricalRows.length > 0) {
+        SheetManager.batchAppend(Config.SHEETS.HISTORICAL_DATA, accumulatedHistoricalRows);
       }
 
-      // Automatically purge cache of expired elements
+      // Performance Optimization 2: Batch write updated Last Processed column back to Stock Master
+      const lastProcessedColumnValues = [];
+      for (let i = 0; i < masterData.length; i++) {
+        lastProcessedColumnValues.push([masterData[i][6]]);
+      }
+
+      // Column 7 in Stock Master is 'Last Processed'
+      masterSheet.getRange(2, 7, lastProcessedColumnValues.length, 1).setValues(lastProcessedColumnValues);
+
+      // Purge and clear expired Cache items dynamically to keep sheet compact
       Cache.purgeExpired();
 
-      Logger.success("MainOrchestrator.updateData", new Date().getTime() - start);
+      const elapsed = new Date().getTime() - start;
+      Logger.success("MainOrchestrator.updateData", elapsed);
 
     } catch (globalError) {
-      Logger.error("MainOrchestrator.updateData", new Date().getTime() - start, globalError);
+      const elapsed = new Date().getTime() - start;
+      Logger.error("MainOrchestrator.updateData", elapsed, globalError);
       throw globalError;
     } finally {
       Logger.flush();
@@ -134,22 +144,24 @@ class MainOrchestrator {
   }
 
   /**
-   * Orchestrator command for running research backtesting strategies.
+   * Orchestrates technical research indicators calculations and strategy simulations.
    */
   static runBacktest() {
     const start = new Date().getTime();
+
+    // Perform safety self-healing check on start to make sure structure is intact
+    this.initializeProject();
+
     Settings.init();
     Logger.init();
 
     try {
-      // Execute future research & analysis placeholders
-      PlaceholderEngine.runMovingAverageAnalysis();
-      PlaceholderEngine.runBreakoutRetestAnalysis();
-      PlaceholderEngine.runBacktestMock();
-
-      Logger.success("MainOrchestrator.runBacktest", new Date().getTime() - start);
+      StrategyEngine.runOverallBacktest();
+      const elapsed = new Date().getTime() - start;
+      Logger.success("MainOrchestrator.runBacktest", elapsed);
     } catch (e) {
-      Logger.error("MainOrchestrator.runBacktest", new Date().getTime() - start, e);
+      const elapsed = new Date().getTime() - start;
+      Logger.error("MainOrchestrator.runBacktest", elapsed, e);
       throw e;
     } finally {
       Logger.flush();
@@ -157,18 +169,28 @@ class MainOrchestrator {
   }
 
   /**
-   * Orchestrator command for compiling and outputting generated analytical reports.
+   * Orchestrates compilation and rendering of analytical reports.
    */
   static generateReport() {
     const start = new Date().getTime();
+
+    // Perform safety self-healing check on start to make sure structure is intact
+    this.initializeProject();
+
     Settings.init();
     Logger.init();
 
     try {
-      PlaceholderEngine.generateReportMock();
-      Logger.success("MainOrchestrator.generateReport", new Date().getTime() - start);
+      const reportId = ReportEngine.compilePerformanceReport();
+      ReportEngine.renderDashboardCharts();
+      ReportEngine.runAIResearchSummary();
+      ReportEngine.exportToObsidianFormat();
+
+      const elapsed = new Date().getTime() - start;
+      Logger.success(`MainOrchestrator.generateReport[${reportId}]`, elapsed);
     } catch (e) {
-      Logger.error("MainOrchestrator.generateReport", new Date().getTime() - start, e);
+      const elapsed = new Date().getTime() - start;
+      Logger.error("MainOrchestrator.generateReport", elapsed, e);
       throw e;
     } finally {
       Logger.flush();
@@ -176,7 +198,7 @@ class MainOrchestrator {
   }
 }
 
-// Expose globally if context allows
+// Export to Node environment for local CI/CD testing
 if (typeof exports !== 'undefined') {
   exports.MainOrchestrator = MainOrchestrator;
 }

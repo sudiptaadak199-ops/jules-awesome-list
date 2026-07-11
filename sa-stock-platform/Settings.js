@@ -1,48 +1,91 @@
 /**
  * SA Stock Research & Backtest Platform - Phase 1 (Foundation)
  *
- * Settings Service
+ * Cached Settings Service with Self-Healing Validation
  *
- * Manages configuration reading, writing, and transactional caching.
+ * Transparently manages configuration readings and mutations.
+ * If a required system setting is deleted or missing from the spreadsheet, it automatically heals and regenerates it.
  */
 
 class Settings {
   /**
-   * Initializes the Settings cache from the active Settings sheet.
+   * Initializes the settings repository cache.
+   * Compares the settings sheet records with Config.DEFAULT_SETTINGS, auto-healing missing variables.
    */
   static init() {
     this._cache = {};
     try {
-      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const ss = SheetManager.getActiveSpreadsheet();
       const sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
+
       if (!sheet) {
-        // Fall back to default config if sheet does not exist yet (e.g., pre-initialization)
         this.loadFromDefaults();
         return;
       }
 
       const lastRow = sheet.getLastRow();
       if (lastRow <= 1) {
-        this.loadFromDefaults();
+        this.repairAllSettings(sheet);
         return;
       }
 
-      const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+      // Read current values
+      const data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      const currentKeys = {};
+
       for (let i = 0; i < data.length; i++) {
         const key = String(data[i][0]).trim();
         const value = String(data[i][1]).trim();
         if (key) {
           this._cache[key] = value;
+          currentKeys[key] = true;
         }
       }
+
+      // Check for missing keys against Config defaults to trigger self-healing
+      let repairNeeded = false;
+      const defaults = Config.DEFAULT_SETTINGS;
+      for (let i = 1; i < defaults.length; i++) {
+        const defaultKey = defaults[i][0];
+        if (!currentKeys[defaultKey]) {
+          repairNeeded = true;
+          this._cache[defaultKey] = defaults[i][1];
+          // Append the missing key row
+          const nowStr = PlatformUtils.formatDate(new Date());
+          sheet.appendRow([defaultKey, defaults[i][1], defaults[i][2], nowStr]);
+        }
+      }
+
+      if (repairNeeded) {
+        console.log("Settings module detected missing variables and completed dynamic self-repair.");
+      }
+
     } catch (e) {
-      // In case of any read exception, fallback to defaults
       this.loadFromDefaults();
     }
   }
 
   /**
-   * Internal routine to populate cache with standard definitions when sheet reads fail/pre-init.
+   * Forces complete sheet settings rebuild.
+   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+   */
+  static repairAllSettings(sheet) {
+    this.loadFromDefaults();
+    const rows = [];
+    const defaults = Config.DEFAULT_SETTINGS;
+    const nowStr = PlatformUtils.formatDate(new Date());
+
+    for (let i = 1; i < defaults.length; i++) {
+      rows.push([defaults[i][0], defaults[i][1], defaults[i][2], nowStr]);
+    }
+
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+    }
+  }
+
+  /**
+   * populates active local memory cache from configuration defaults.
    */
   static loadFromDefaults() {
     this._cache = {};
@@ -53,87 +96,80 @@ class Settings {
   }
 
   /**
-   * Retrieves a setting value by key with optional fallback.
-   * @param {string} key - The setting name.
-   * @param {any} defaultValue - Default value if not found.
-   * @returns {string} Setting value.
+   * Retrieves a setting key.
+   * @param {string} key - Setting name.
+   * @param {any} defaultValue - Fallback.
+   * @returns {string} String configuration.
    */
   static get(key, defaultValue = "") {
-    if (!this._cache) {
+    if (!this._cache || Object.keys(this._cache).length === 0) {
       this.init();
     }
     return this._cache[key] !== undefined ? this._cache[key] : defaultValue;
   }
 
   /**
-   * Retrieves a numeric setting.
-   * @param {string} key - Setting key.
-   * @param {number} defaultValue - Default fallback.
-   * @returns {number} Numeric parsed setting.
+   * Numeric settings parsed getter.
+   * @param {string} key - Setting name.
+   * @param {number} defaultValue - Fallback.
+   * @returns {number}
    */
   static getNum(key, defaultValue = 0) {
-    const val = this.get(key);
-    const parsed = parseFloat(val);
-    return isNaN(parsed) ? defaultValue : parsed;
+    const val = parseFloat(this.get(key));
+    return isNaN(val) ? defaultValue : val;
   }
 
   /**
-   * Retrieves a boolean setting.
-   * @param {string} key - Setting key.
-   * @param {boolean} defaultValue - Default fallback.
-   * @returns {boolean} Boolean value.
+   * Boolean settings parsed getter.
+   * @param {string} key - Setting name.
+   * @param {boolean} defaultValue - Fallback.
+   * @returns {boolean}
    */
   static getBool(key, defaultValue = false) {
-    const val = String(this.get(key)).toUpperCase();
-    if (val === "TRUE" || val === "1" || val === "YES") return true;
-    if (val === "FALSE" || val === "0" || val === "NO") return false;
-    return defaultValue;
+    return PlatformUtils.toBool(this.get(key, defaultValue));
   }
 
   /**
-   * Updates a setting value both in active memory and in the persistent Sheet store.
-   * Performs an efficient row scan to avoid complete sheet rebuild.
-   * @param {string} key - Setting key.
-   * @param {string} value - New value.
+   * Sets / writes system configuration both in runtime memory cache and persistent sheet cell.
+   * @param {string} key - Setting name.
+   * @param {string} value - Value representation.
    */
   static set(key, value) {
     if (!this._cache) {
-      this.init();
+      this._cache = {};
     }
     this._cache[key] = String(value);
 
     try {
-      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const ss = SheetManager.getActiveSpreadsheet();
       const sheet = ss.getSheetByName(Config.SHEETS.SETTINGS);
       if (!sheet) return;
 
       const lastRow = sheet.getLastRow();
+      let found = false;
+
       if (lastRow > 1) {
         const range = sheet.getRange(2, 1, lastRow - 1, 2);
         const data = range.getValues();
-        let found = false;
-
         for (let i = 0; i < data.length; i++) {
           if (String(data[i][0]).trim() === key) {
-            sheet.getRange(i + 2, 2).setValue(value);
+            sheet.getRange(i + 2, 2, 1, 3).setValues([[String(value), "Updated on flow runtime.", PlatformUtils.formatDate(new Date())]]);
             found = true;
             break;
           }
         }
+      }
 
-        if (!found) {
-          sheet.appendRow([key, value, "Custom dynamic platform setting."]);
-        }
-      } else {
-        sheet.appendRow([key, value, "Custom dynamic platform setting."]);
+      if (!found) {
+        sheet.appendRow([key, String(value), "Dynamic runtime key addition.", PlatformUtils.formatDate(new Date())]);
       }
     } catch (e) {
-      // In non-sheets environments (e.g. testing context), ignore write errors
+      // safe fallback for mock unit tests
     }
   }
 }
 
-// Expose Settings globally if context allows
+// Export to Node environment for local CI/CD testing
 if (typeof exports !== 'undefined') {
   exports.Settings = Settings;
 }

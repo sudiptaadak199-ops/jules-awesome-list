@@ -1,63 +1,70 @@
 /**
  * SA Stock Research & Backtest Platform - Phase 1 (Foundation)
  *
- * Logging Service
+ * Buffered Enterprise Execution Logger
  *
- * A professional, high-performance structured execution logger.
- * Implements a buffer so that sequential logs during a process run can be written
- * in one single spreadsheet transaction at the end, or written immediately if needed.
+ * Provides professional logging metrics including execution timestamps, durations, and status codes.
+ * Uses local list buffering to execute exactly one Spreadsheet append transaction at completion.
  */
 
 class Logger {
   /**
-   * Initializes the logger log buffer.
+   * Initializes the logger transaction buffer array.
    */
   static init() {
     this._buffer = [];
   }
 
   /**
-   * Logs a message with "SUCCESS" status.
-   * @param {string} functionName - Name of the executing routine.
-   * @param {number} durationMs - Execution time in milliseconds.
+   * Logs a successful operation run.
+   * @param {string} functionName - Scope function.
+   * @param {number} durationMs - Spent time in ms.
    */
   static success(functionName, durationMs = 0) {
-    this.log(functionName, "SUCCESS", durationMs, "");
+    this.appendEntry(functionName, "SUCCESS", durationMs, "");
   }
 
   /**
-   * Logs a message with "ERROR" status.
-   * @param {string} functionName - Name of the executing routine.
-   * @param {number} durationMs - Execution time in milliseconds.
-   * @param {string|Error} error - Error message or object.
+   * Logs a warning operation run.
+   * @param {string} functionName - Scope function.
+   * @param {number} durationMs - Spent time in ms.
+   * @param {string} warningMsg - Custom diagnostic context.
    */
-  static error(functionName, durationMs = 0, error = "") {
-    const errorMsg = error instanceof Error ? error.message + "\nStack: " + error.stack : String(error);
-    this.log(functionName, "ERROR", durationMs, errorMsg);
+  static warning(functionName, durationMs = 0, warningMsg = "") {
+    this.appendEntry(functionName, "WARNING", durationMs, warningMsg);
   }
 
   /**
-   * Appends an execution entry to the local buffer.
-   * @param {string} functionName - Name of the executing routine.
-   * @param {string} status - SUCCESS, ERROR, or WARNING.
-   * @param {number} durationMs - Execution time in milliseconds.
-   * @param {string} errorMessage - Error details if status is ERROR.
+   * Logs a failed operation run.
+   * @param {string} functionName - Scope function.
+   * @param {number} durationMs - Spent time in ms.
+   * @param {string|Error} err - Error object or string message.
    */
-  static log(functionName, status, durationMs, errorMessage = "") {
+  static error(functionName, durationMs = 0, err = "") {
+    let errorMsg = "";
+    if (err instanceof Error) {
+      errorMsg = `${err.message} | Stack: ${err.stack}`;
+    } else {
+      errorMsg = String(err);
+    }
+    this.appendEntry(functionName, "ERROR", durationMs, errorMsg);
+  }
+
+  /**
+   * Compiles and appends logs into the active memory array.
+   * @param {string} functionName - Scope function.
+   * @param {string} status - SUCCESS, WARNING, or ERROR.
+   * @param {number} durationMs - Process length.
+   * @param {string} description - Detail context.
+   */
+  static appendEntry(functionName, status, durationMs, description = "") {
     if (!this._buffer) {
       this.init();
     }
 
     const now = new Date();
-    // Format Date: YYYY-MM-DD
-    const dateStr = now.getFullYear() + "-" +
-                    String(now.getMonth() + 1).padStart(2, '0') + "-" +
-                    String(now.getDate()).padStart(2, '0');
-
-    // Format Time: HH:MM:SS
-    const timeStr = String(now.getHours()).padStart(2, '0') + ":" +
-                    String(now.getMinutes()).padStart(2, '0') + ":" +
-                    String(now.getSeconds()).padStart(2, '0');
+    const dateStr = PlatformUtils.formatDate(now);
+    const timeStr = PlatformUtils.formatTime(now);
 
     this._buffer.push([
       dateStr,
@@ -65,31 +72,32 @@ class Logger {
       functionName,
       status,
       durationMs,
-      errorMessage
+      description
     ]);
 
-    // If Debug Mode setting is active, also print to Stackdriver/Apps Script Execution Logs
+    // Stackdriver integration if system debug setting is enabled
     if (Settings.getBool("Debug Mode", false)) {
-      const consoleLogMsg = `[${status}] ${functionName} (${durationMs}ms) - ${errorMessage || "OK"}`;
+      const consoleMsg = `[SA PLATFORM LOG] [${status}] ${functionName} (${durationMs}ms) - ${description || "OK"}`;
       if (status === "ERROR") {
-        console.error(consoleLogMsg);
+        console.error(consoleMsg);
+      } else if (status === "WARNING") {
+        console.warn(consoleMsg);
       } else {
-        console.log(consoleLogMsg);
+        console.log(consoleMsg);
       }
     }
   }
 
   /**
-   * Flushes the buffer by writing all accumulated log rows to the Google Sheet in a single batch operation.
-   * Clears the buffer.
+   * Writes all locally buffered operational rows directly to the Logs database tab in one batch operation.
+   * Wipes memory array afterwards.
    */
   static flush() {
     if (!this._buffer || this._buffer.length === 0) return;
     try {
       SheetManager.batchAppend(Config.SHEETS.LOGS, this._buffer);
     } catch (e) {
-      // Emergency console logs if Sheet writes fail
-      console.error("Failed to write buffer logs to spreadsheet: " + e.message);
+      console.error("Critical failure during batch logging transaction: " + e.message);
       console.log("Buffered logs: " + JSON.stringify(this._buffer));
     } finally {
       this.clear();
@@ -97,14 +105,14 @@ class Logger {
   }
 
   /**
-   * Clears current log buffer.
+   * Clears the current transaction buffer.
    */
   static clear() {
     this._buffer = [];
   }
 }
 
-// Expose Logger globally if context allows
+// Export to Node environment for local CI/CD testing
 if (typeof exports !== 'undefined') {
   exports.Logger = Logger;
 }

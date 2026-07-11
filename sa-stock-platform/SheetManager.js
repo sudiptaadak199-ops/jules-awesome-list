@@ -1,310 +1,230 @@
 /**
  * SA Stock Research & Backtest Platform - Phase 1 (Foundation)
  *
- * Spreadsheet Manager Module
+ * Enterprise Sheet Manager & Auto-Repair Database Module
  *
- * Handles high-performance operations, sheet auto-creation, structured formatting,
- * and batch read/write routines to respect execution limits and minimize round trips.
+ * High-performance batch read/write controller, formatting engine, and self-healing layout validation layer.
+ * Zero hardcoding: structures and styling configurations are dynamically parsed from the central configuration definition.
  */
 
 class SheetManager {
   /**
-   * Initializes all required sheets with beautiful formatting if they do not exist.
-   * Does not recreate or clear sheets if they already exist.
+   * Safe getter for active Google Spreadsheet. Bypasses hardcoded IDs.
+   * @returns {GoogleAppsScript.Spreadsheet.Spreadsheet}
    */
-  static initializeAllSheets() {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-    // Ensure each sheet exists in order
-    this.ensureSheetExists(ss, Config.SHEETS.DASHBOARD, this.formatDashboardSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.SETTINGS, this.formatSettingsSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.STOCK_MASTER, this.formatStockMasterSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.HISTORICAL_DATA, this.formatHistoricalDataSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.REPORTS, this.formatReportsSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.LOGS, this.formatLogsSheet.bind(this));
-    this.ensureSheetExists(ss, Config.SHEETS.CACHE, this.formatCacheSheet.bind(this));
+  static getActiveSpreadsheet() {
+    return SpreadsheetApp.getActiveSpreadsheet();
   }
 
   /**
-   * Checks for a sheet's existence. If not found, creates it and applies the formatting callback.
-   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss - Active Spreadsheet object.
-   * @param {string} name - Name of the sheet.
-   * @param {Function} formatCallback - Callback function to build/format the sheet.
+   * Initializes all sheets.
+   * Repairs missing sheets or repairs missing headers/formats without wiping existing data.
    */
-  static ensureSheetExists(ss, name, formatCallback) {
-    let sheet = ss.getSheetByName(name);
+  static initializeAllSheets() {
+    const ss = this.getActiveSpreadsheet();
+    const sheetDefs = Config.SHEETS_DEFINITION;
+
+    for (const sheetName in sheetDefs) {
+      this.ensureAndRepairSheet(ss, sheetName, sheetDefs[sheetName]);
+    }
+  }
+
+  /**
+   * Creates sheet if missing, styles headers, sets gridlines, column widths, and freezes rows.
+   * If the sheet exists but some headers or structure are corrupted, it safely repairs them.
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss - Spreadsheet object.
+   * @param {string} sheetName - Target tab.
+   * @param {object} def - Definition from Config.
+   */
+  static ensureAndRepairSheet(ss, sheetName, def) {
+    let sheet = ss.getSheetByName(sheetName);
+    let newlyCreated = false;
+
     if (!sheet) {
-      sheet = ss.insertSheet(name);
-      if (formatCallback) {
-        formatCallback(sheet);
+      sheet = ss.insertSheet(sheetName);
+      newlyCreated = true;
+    }
+
+    // Apply configuration gridline toggle
+    sheet.setGridlines(def.gridlines !== false);
+
+    // Freeze rows if configured
+    if (def.frozenRows) {
+      sheet.setFrozenRows(def.frozenRows);
+    }
+
+    // Set professional column widths
+    if (def.columnsWidths) {
+      for (let i = 0; i < def.columnsWidths.length; i++) {
+        sheet.setColumnWidth(i + 1, def.columnsWidths[i]);
+      }
+    }
+
+    // Format headers and default rows if needed
+    if (def.headers) {
+      const currentHeaders = sheet.getLastRow() > 0 ? sheet.getRange(1, 1, 1, def.headers.length).getValues()[0] : [];
+      let headersMatch = true;
+
+      for (let i = 0; i < def.headers.length; i++) {
+        if (String(currentHeaders[i]).trim() !== String(def.headers[i]).trim()) {
+          headersMatch = false;
+          break;
+        }
+      }
+
+      // Overwrite/repair headers if they don't match or are empty
+      if (!headersMatch || sheet.getLastRow() === 0) {
+        const headerRange = sheet.getRange(1, 1, 1, def.headers.length);
+        headerRange.setValues([def.headers]);
+        this.applyHeaderStyle(headerRange);
+        sheet.setRowHeight(1, 28);
+      }
+    }
+
+    // Write default mockup datasets if sheet was newly created
+    if (newlyCreated) {
+      if (sheetName === Config.SHEETS.DASHBOARD) {
+        this.buildDashboardLayout(sheet);
+      } else if (def.defaultRows && def.defaultRows.length > 0) {
+        const dataRange = sheet.getRange(2, 1, def.defaultRows.length, def.defaultRows[0].length);
+        dataRange.setValues(def.defaultRows);
+        this.applyBodyFormat(dataRange);
       }
     }
   }
 
   /**
-   * Applies clean styling to a table header range.
-   * @param {GoogleAppsScript.Spreadsheet.Range} range - Header range to format.
+   * Formats headers programmatically with the selected theme token colors.
+   * @param {GoogleAppsScript.Spreadsheet.Range} range - The header range to format.
    */
-  static applyHeaderFormat(range) {
-    range.setBackground(Config.COLORS.PRIMARY_DARK)
-         .setFontColor(Config.COLORS.TEXT_LIGHT)
+  static applyHeaderStyle(range) {
+    range.setBackground(Config.THEME.COLORS.PRIMARY_DARK)
+         .setFontColor(Config.THEME.COLORS.TEXT_LIGHT)
          .setFontWeight("bold")
-         .setFontFamily("Roboto")
-         .setFontSize(10)
+         .setFontFamily(Config.THEME.FONTS.FAMILY)
+         .setFontSize(Config.THEME.FONTS.SIZE_HEADER)
          .setHorizontalAlignment("center")
          .setVerticalAlignment("middle");
   }
 
   /**
-   * Formats the Dashboard sheet as a control center.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+   * Formats the body data row ranges to look extremely clean and structured.
+   * @param {GoogleAppsScript.Spreadsheet.Range} range - The data rows range to format.
    */
-  static formatDashboardSheet(sheet) {
-    sheet.clear();
-    sheet.setGridlines(false);
-
-    // Title Banner
-    sheet.getRange("B2:H2").merge()
-         .setValue("SA STOCK RESEARCH & BACKTEST PLATFORM")
-         .setFontSize(18)
-         .setFontWeight("bold")
-         .setFontColor(Config.COLORS.PRIMARY_DARK)
-         .setFontFamily("Roboto")
-         .setHorizontalAlignment("center");
-
-    sheet.getRange("B3:H3").merge()
-         .setValue("Control Center & Analytical Dashboard (Phase 1 Foundation)")
-         .setFontSize(11)
-         .setFontStyle("italic")
-         .setFontColor(Config.COLORS.ACCENT)
-         .setFontFamily("Roboto")
-         .setHorizontalAlignment("center");
-
-    // Help box and documentation pointer
-    const infoRange = sheet.getRange("B5:H8");
-    infoRange.merge()
-             .setValue("Welcome to your Stock Backtesting and Analytics Platform.\n\n" +
-                       "• Use the custom menu 'SA Platform' to perform system operations.\n" +
-                       "• Complete instructions, installation guides, and extension documentation are detailed in the repository's README.md.\n" +
-                       "• Configure data source, API credentials, and engine settings in the 'Settings' sheet.")
-             .setBackground("#eaf2f8")
-             .setFontColor(Config.COLORS.TEXT_DARK)
-             .setFontSize(10)
-             .setFontFamily("Roboto")
-             .setVerticalAlignment("top")
-             .setWrap(true);
-
-    // Draw thin elegant borders around info box
-    infoRange.setBorder(true, true, true, true, false, false, Config.COLORS.ACCENT, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
-
-    // Platform State Block
-    sheet.getRange("B10").setValue("Platform Configuration State:").setFontWeight("bold").setFontSize(11).setFontFamily("Roboto");
-    sheet.getRange("B11").setValue("Version:");
-    sheet.getRange("C11").setValue(Config.VERSION).setFontStyle("italic");
-    sheet.getRange("B12").setValue("Database Initialization Status:");
-    sheet.getRange("C12").setValue("Ready (Run 'Initialize Project')").setFontWeight("bold").setFontColor("#2d6a4f");
-
-    // Basic Column Width adjustments for styling
-    sheet.setColumnWidth(1, 40); // spacer column A
-    sheet.setColumnWidth(2, 220);
-    sheet.setColumnWidth(3, 180);
-    sheet.setColumnWidth(4, 120);
-    sheet.setColumnWidth(5, 120);
-    sheet.setColumnWidth(6, 120);
-    sheet.setColumnWidth(7, 120);
-    sheet.setColumnWidth(8, 120);
+  static applyBodyFormat(range) {
+    range.setFontFamily(Config.THEME.FONTS.FAMILY)
+         .setFontSize(Config.THEME.FONTS.SIZE_BODY)
+         .setVerticalAlignment("middle");
   }
 
   /**
-   * Formats the Settings sheet and loads default configurations.
+   * Generates a dashboard layout layout programmatically.
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
    */
-  static formatSettingsSheet(sheet) {
+  static buildDashboardLayout(sheet) {
     sheet.clear();
-    sheet.setGridlines(true);
 
-    // Set Default settings with styled headers
-    const defaults = Config.DEFAULT_SETTINGS;
-    const range = sheet.getRange(1, 1, defaults.length, defaults[0].length);
-    range.setValues(defaults);
+    // Title Section
+    const titleRange = sheet.getRange("B2:H2");
+    titleRange.merge()
+              .setValue(Config.METADATA.NAME.toUpperCase())
+              .setFontSize(Config.THEME.FONTS.SIZE_TITLE)
+              .setFontWeight("bold")
+              .setFontColor(Config.THEME.COLORS.PRIMARY_DARK)
+              .setFontFamily(Config.THEME.FONTS.FAMILY)
+              .setHorizontalAlignment("center");
 
-    // Style Header Row
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, defaults[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.getRange("A:A").setFontWeight("bold").setFontFamily("Roboto");
-    sheet.getRange("B:C").setFontFamily("Roboto");
+    const subtitleRange = sheet.getRange("B3:H3");
+    subtitleRange.merge()
+                 .setValue("Enterprise Backtesting & Quant Trading Hub • Foundation Release")
+                 .setFontSize(Config.THEME.FONTS.SIZE_SUBTITLE)
+                 .setFontStyle("italic")
+                 .setFontColor(Config.THEME.COLORS.ACCENT)
+                 .setFontFamily(Config.THEME.FONTS.FAMILY)
+                 .setHorizontalAlignment("center");
 
-    // Auto-fit columns
-    sheet.setColumnWidth(1, 160);
-    sheet.setColumnWidth(2, 180);
-    sheet.setColumnWidth(3, 350);
+    // Documentation Container
+    const infoBox = sheet.getRange("B5:H9");
+    infoBox.merge()
+           .setValue("PLATFORM INSTRUCTIONS:\n\n" +
+                     "• Deploy operations directly via the custom spreadsheet menu 'SA Platform'.\n" +
+                     "• Run 'Update Data Engine' to automatically synchronize listed master equities.\n" +
+                     "• Customize rates, intervals, retry limits, and cache states inside the 'Settings' tab.\n" +
+                     "• Developer extension guides and full installation manual are located inside the repository README.md.")
+           .setBackground(Config.THEME.COLORS.INFO_BOX_BG)
+           .setFontColor(Config.THEME.COLORS.TEXT_DARK)
+           .setFontFamily(Config.THEME.FONTS.FAMILY)
+           .setFontSize(10)
+           .setVerticalAlignment("top")
+           .setWrap(true);
+
+    infoBox.setBorder(true, true, true, true, false, false, Config.THEME.COLORS.ACCENT, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Metadata System Stats Panel
+    sheet.getRange("B11").setValue("System Core Environment Status:").setFontWeight("bold").setFontSize(10).setFontFamily(Config.THEME.FONTS.FAMILY);
+    sheet.getRange("B12").setValue("Installed Version:");
+    sheet.getRange("C12").setValue(Config.METADATA.VERSION).setFontStyle("italic");
+    sheet.getRange("B13").setValue("Operational Database Schema:");
+    sheet.getRange("C13").setValue("Connected & Styled (Active)").setFontWeight("bold").setFontColor("#2d6a4f");
+    sheet.getRange("B14").setValue("Default Timezone Context:");
+    sheet.getRange("C14").setValue(Config.METADATA.TIMEZONE);
   }
 
   /**
-   * Formats the Stock Master sheet.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+   * Reads data in batch from sheet.
+   * @param {string} sheetName - Target tab.
+   * @param {number} r - Row index.
+   * @param {number} c - Column index.
+   * @param {number} rowsCount - Row size.
+   * @param {number} colsCount - Column size.
+   * @returns {Array<Array<any>>} Double array grid of data.
    */
-  static formatStockMasterSheet(sheet) {
-    sheet.clear();
-    const headers = [["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"]];
-    sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, headers[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.setFrozenRows(1);
-
-    // Initial placeholders
-    const placeholderRow = [["RELIANCE", "Reliance Industries Ltd.", "NSE", "Energy", "Oil & Gas", "Active", "", new Date()]];
-    sheet.getRange(2, 1, 1, placeholderRow[0].length).setValues(placeholderRow);
-
-    sheet.setColumnWidth(1, 120);
-    sheet.setColumnWidth(2, 220);
-    sheet.setColumnWidth(3, 90);
-    sheet.setColumnWidth(4, 130);
-    sheet.setColumnWidth(5, 150);
-    sheet.setColumnWidth(6, 100);
-    sheet.setColumnWidth(7, 140);
-    sheet.setColumnWidth(8, 140);
+  static batchRead(sheetName, r, c, rowsCount, colsCount) {
+    const ss = this.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+    return sheet.getRange(r, c, rowsCount, colsCount).getValues();
   }
 
   /**
-   * Formats the Historical Data sheet.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+   * Writes data in batch to sheet.
+   * @param {string} sheetName - Target tab.
+   * @param {Array<Array<any>>} values - Two-dimensional values.
+   * @param {number} r - Row index.
+   * @param {number} c - Column index.
    */
-  static formatHistoricalDataSheet(sheet) {
-    sheet.clear();
-    const headers = [["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]];
-    sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, headers[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.setFrozenRows(1);
-
-    sheet.setColumnWidth(1, 100);
-    sheet.setColumnWidth(2, 110);
-    sheet.setColumnWidth(3, 90);
-    sheet.setColumnWidth(4, 90);
-    sheet.setColumnWidth(5, 90);
-    sheet.setColumnWidth(6, 90);
-    sheet.setColumnWidth(7, 100);
-    sheet.setColumnWidth(8, 120);
-    sheet.setColumnWidth(9, 120);
-    sheet.setColumnWidth(10, 140);
-  }
-
-  /**
-   * Formats the Reports sheet.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
-   */
-  static formatReportsSheet(sheet) {
-    sheet.clear();
-    const headers = [["Report ID", "Generated At", "Report Type", "Metrics Summary", "Download/View Link"]];
-    sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, headers[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.setFrozenRows(1);
-
-    sheet.setColumnWidth(1, 150);
-    sheet.setColumnWidth(2, 150);
-    sheet.setColumnWidth(3, 150);
-    sheet.setColumnWidth(4, 300);
-    sheet.setColumnWidth(5, 200);
-  }
-
-  /**
-   * Formats the Logs sheet.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
-   */
-  static formatLogsSheet(sheet) {
-    sheet.clear();
-    const headers = [["Date", "Time", "Function Name", "Status", "Duration (ms)", "Error Message"]];
-    sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, headers[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.setFrozenRows(1);
-
-    sheet.setColumnWidth(1, 100);
-    sheet.setColumnWidth(2, 90);
-    sheet.setColumnWidth(3, 180);
-    sheet.setColumnWidth(4, 100);
-    sheet.setColumnWidth(5, 120);
-    sheet.setColumnWidth(6, 350);
-  }
-
-  /**
-   * Formats the Cache sheet.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
-   */
-  static formatCacheSheet(sheet) {
-    sheet.clear();
-    const headers = [["Key", "Value", "Expiration Date"]];
-    sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-    this.applyHeaderFormat(sheet.getRange(1, 1, 1, headers[0].length));
-    sheet.setRowHeight(1, 28);
-    sheet.setFrozenRows(1);
-
-    sheet.setColumnWidth(1, 200);
-    sheet.setColumnWidth(2, 450);
-    sheet.setColumnWidth(3, 180);
-  }
-
-  /**
-   * High-performance batch writing helper. Writes values to a sheet starting from row.
-   * @param {string} sheetName - Target sheet name.
-   * @param {Array<Array<any>>} values - Two-dimensional array representing grid data.
-   * @param {number} startRow - Destination row (defaults to 1).
-   * @param {number} startCol - Destination column (defaults to 1).
-   */
-  static batchWrite(sheetName, values, startRow = 1, startCol = 1) {
+  static batchWrite(sheetName, values, r = 1, c = 1) {
     if (!values || values.length === 0) return;
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = this.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) {
-      throw new Error(`Sheet with name "${sheetName}" does not exist.`);
-    }
-    const range = sheet.getRange(startRow, startCol, values.length, values[0].length);
+    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+
+    const range = sheet.getRange(r, c, values.length, values[0].length);
     range.setValues(values);
+    this.applyBodyFormat(range);
   }
 
   /**
-   * High-performance batch reading helper. Returns all values in a rectangular range.
-   * @param {string} sheetName - Target sheet name.
-   * @param {number} startRow - Starting row index.
-   * @param {number} startCol - Starting column index.
-   * @param {number} numRows - Number of rows to read.
-   * @param {number} numCols - Number of columns to read.
-   * @returns {Array<Array<any>>} Two-dimensional array of values.
-   */
-  static batchRead(sheetName, startRow, startCol, numRows, numCols) {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) {
-      throw new Error(`Sheet with name "${sheetName}" does not exist.`);
-    }
-    return sheet.getRange(startRow, startCol, numRows, numCols).getValues();
-  }
-
-  /**
-   * Appends rows in batch to a target sheet using efficient array boundaries.
-   * @param {string} sheetName - Target sheet name.
-   * @param {Array<Array<any>>} rows - 2D matrix of row data.
+   * High performance atomic append to optimize write execution cycles.
+   * @param {string} sheetName - Target sheet.
+   * @param {Array<Array<any>>} rows - Array of rows to write.
    */
   static batchAppend(sheetName, rows) {
     if (!rows || rows.length === 0) return;
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = this.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(sheetName);
-    if (!sheet) {
-      throw new Error(`Sheet with name "${sheetName}" does not exist.`);
-    }
-    const lastRow = sheet.getLastRow();
-    const targetRow = lastRow + 1;
-    this.batchWrite(sheetName, rows, targetRow, 1);
+    if (!sheet) throw new Error(`Operational sheet [${sheetName}] does not exist.`);
+
+    const startRow = sheet.getLastRow() + 1;
+    this.batchWrite(sheetName, rows, startRow, 1);
   }
 
   /**
-   * Clears all content below the headers (row 1) of a specified sheet.
-   * @param {string} sheetName - Target sheet name.
+   * Wipes data rows below the designated frozen header.
+   * @param {string} sheetName - Target sheet tab.
    */
   static clearDataBelowHeaders(sheetName) {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = this.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(sheetName);
     if (!sheet) return;
     const lastRow = sheet.getLastRow();
@@ -314,7 +234,7 @@ class SheetManager {
   }
 }
 
-// Expose SheetManager globally if context allows
+// Export to Node environment for local CI/CD testing
 if (typeof exports !== 'undefined') {
   exports.SheetManager = SheetManager;
 }

@@ -196,11 +196,11 @@ class MainOrchestrator {
    * Orchestrates high-performance data ingestion across master listings.
    * Implements full 14-step architecture:
    * 1. Check self-healing health.
-   * 2. Initialize in-memory configuration.
-   * 3. Fetch active master stocks in bulk.
-   * 4. Query caching layer to bypass unnecessary API fetches.
-   * 5. Fallback fetch from raw API feeds on cache miss.
-   * 6. Perform validation metrics and accumulate price history rows.
+   * 2. Initialize in-memory configuration settings.
+   * 3. Fetch active master stocks.
+   * 4. Query existing historical dates in a single batch scan to establish the last recorded EOD dates.
+   * 5. Parallel batch fetch new daily market data from Yahoo Finance via UrlFetchApp.fetchAll().
+   * 6. Perform validation and accumulate fresh EOD rows (Incremental Loading!).
    * 7. Trigger the Sector Engine rotation and ranking calculations.
    * 8. Append records, purge cache, track statistics, and write Performance Monitor to Dashboard.
    */
@@ -226,9 +226,10 @@ class MainOrchestrator {
     try {
       var ss = SheetManager.getActiveSpreadsheet();
       var masterSheet = ss.getSheetByName(Config.SHEETS.STOCK_MASTER);
+      var histSheet = ss.getSheetByName(Config.SHEETS.HISTORICAL_DATA);
 
-      if (!masterSheet) {
-        throw new Error("Critical: Stock Master sheet is missing or corrupted. Run Initialize Project first.");
+      if (!masterSheet || !histSheet) {
+        throw new Error("Critical: Missing core sheets. Run Initialize Project first.");
       }
 
       var lastRow = masterSheet.getLastRow();
@@ -256,74 +257,65 @@ class MainOrchestrator {
         return;
       }
 
-      var batchSize = Settings.getNum("Batch Size", 100);
-      var accumulatedHistoricalRows = [];
-      var cacheEnabled = Settings.getBool("Cache Enabled", true);
+      // Add NIFTY benchmark index to active fetch list to keep its data updated
+      if (activeSymbols.indexOf("NIFTY") === -1) {
+        activeSymbols.push("NIFTY");
+      }
 
-      // Process in chunked iterations to optimize memory usage bounds
-      for (var i = 0; i < activeSymbols.length; i += batchSize) {
-        var chunkSymbols = activeSymbols.slice(i, i + batchSize);
-        var chunkIndices = localIndices.slice(i, i + batchSize);
-
-        for (var j = 0; j < chunkSymbols.length; j++) {
-          var symbol = chunkSymbols[j];
-          var dataIndex = chunkIndices[j];
-          var stockStart = new Date().getTime();
-
-          // Individual stock boundary wrapper: single stock failure never terminates execution
-          try {
-            var result = null;
-            var cacheKey = "LAST_PRICE_DATA_" + symbol;
-
-            // 1. Check Caching Layer
-            var cachedData = cacheEnabled ? Cache.get(cacheKey) : null;
-            if (cachedData) {
-              try {
-                result = JSON.parse(cachedData);
-              } catch (e) {
-                result = null; // Cache corrupted
-              }
+      // 4. Batch scan Historical Data in-memory to find the last recorded date for each symbol
+      var lastDatesMap = {};
+      var lastHistRow = histSheet.getLastRow();
+      if (lastHistRow > 1) {
+        var histDates = histSheet.getRange(2, 1, lastHistRow - 1, 2).getValues();
+        for (var i = 0; i < histDates.length; i++) {
+          var sym = String(histDates[i][0]).trim();
+          var dtStr = String(histDates[i][1]).trim();
+          if (sym && dtStr) {
+            if (!lastDatesMap[sym] || new Date(dtStr).getTime() > new Date(lastDatesMap[sym]).getTime()) {
+              lastDatesMap[sym] = dtStr;
             }
-
-            // 2. Fetch from Feed on Cache Miss
-            if (!result) {
-              monitorStats.apiRequests += 1;
-              var fetchRes = DataProvider.fetchAndStoreStockData(symbol);
-              if (fetchRes.status === "SUCCESS") {
-                result = fetchRes;
-                if (cacheEnabled && fetchRes.records.length > 0) {
-                  Cache.put(cacheKey, fetchRes, 60); // Cache for 60 minutes
-                }
-              } else {
-                monitorStats.failedRequests += 1;
-                throw new Error("Market Data API fetch failed for [" + symbol + "]");
-              }
-            }
-
-            // 3. Accumulate historical rows in memory
-            if (result && result.records && result.records.length > 0) {
-              for (var k = 0; k < result.records.length; k++) {
-                // Ensure Date object formatting
-                var row = result.records[k];
-                row[9] = new Date(); // Update Timestamp column (index 9)
-                accumulatedHistoricalRows.push(row);
-              }
-            }
-
-            // Update local memory data matrix Last Processed Column
-            masterData[dataIndex][6] = new Date(); // Col 7 is Last Processed (index 6)
-
-          } catch (individualError) {
-            var stockElapsed = new Date().getTime() - stockStart;
-            Logger.error("MainOrchestrator.updateData[" + symbol + "]", stockElapsed, individualError);
           }
         }
       }
 
-      // Performance Optimization: Write all accumulated historical rows in exactly ONE batch call
+      // 5. Parallel Batch Ingestion & Data Quality Validation
+      var batchResults = DataProvider.fetchAndStoreStockDataBatch(activeSymbols, lastDatesMap, monitorStats);
+
+      // 6. Accumulate new EOD daily records (filtering out duplicates!)
+      var accumulatedHistoricalRows = [];
+      for (var s = 0; s < activeSymbols.length; s++) {
+        var symbol = activeSymbols[s];
+        var rows = batchResults[symbol];
+        if (!rows) continue;
+
+        var lastRecordedDate = lastDatesMap[symbol];
+        var lastTime = lastRecordedDate ? new Date(lastRecordedDate).getTime() : 0;
+
+        for (var k = 0; k < rows.length; k++) {
+          var row = rows[k];
+          var rowDate = row[1];
+          var rowTime = new Date(rowDate).getTime();
+
+          // Only accumulate daily rows that are strictly newer than the last recorded date in the database
+          if (rowTime > lastTime) {
+            row[9] = new Date(); // Update Updated At timestamp column (index 9)
+            accumulatedHistoricalRows.push(row);
+          }
+        }
+      }
+
+      // Write all accumulated historical rows in exactly ONE bulk call
       if (accumulatedHistoricalRows.length > 0) {
         SheetManager.batchAppend(Config.SHEETS.HISTORICAL_DATA, accumulatedHistoricalRows);
         monitorStats.dataRowsUpdated = accumulatedHistoricalRows.length;
+      }
+
+      // Update Stock Master Last Processed Date in-memory
+      for (var i = 0; i < masterData.length; i++) {
+        var sym = String(masterData[i][0]).trim();
+        if (batchResults[sym]) {
+          masterData[i][6] = new Date(); // Update Last Processed
+        }
       }
 
       // Batch write updated Last Processed column back to Stock Master
@@ -331,11 +323,9 @@ class MainOrchestrator {
       for (var i = 0; i < masterData.length; i++) {
         lastProcessedColumnValues.push([masterData[i][6]]);
       }
-
-      // Column 7 in Stock Master is 'Last Processed'
       masterSheet.getRange(2, 7, lastProcessedColumnValues.length, 1).setValues(lastProcessedColumnValues);
 
-      // Purge and clear expired Cache items dynamically to keep sheet compact
+      // Purge expired Cache items dynamically to keep sheet compact
       Cache.purgeExpired();
 
       // Trigger the Sector Rotation Calculations & Scoring Engine

@@ -5,8 +5,8 @@
  *
  * Implements full 14-step architecture:
  * 1. Read master listings and historical pricing data in-memory.
- * 2. Calculate stock-level technical metrics (RVOL, Vol Acceleration, Price Momentum, Trend Breadth, and RS vs Nifty).
- * 3. Formulate individual Stock Rotation Scores.
+ * 2. Calculate stock-level technical metrics (EMA 20, EMA 50, RVOL, Vol Acceleration, Returns, Trend Breadth, and RS vs Nifty).
+ * 3. Formulate individual Stock Rotation Scores and New Money Inflow Scores.
  * 4. Aggregate metrics by sector.
  * 5. Classify sectors into five distinct stages.
  * 6. Detect New Money Inflows and stage rotation shifts.
@@ -15,6 +15,41 @@
  */
 
 class SectorEngine {
+  /**
+   * Helper function to calculate Exponential Moving Average (EMA) from an array of values.
+   * alpha = 2 / (N + 1)
+   * EMA_t = Price_t * alpha + EMA_y * (1 - alpha)
+   * @param {Array<number>} values
+   * @param {number} period
+   * @returns {Array<number>}
+   */
+  static calculateEMA(values, period) {
+    var ema = [];
+    if (values.length === 0) return ema;
+
+    var alpha = 2 / (period + 1);
+
+    // Initial SMA to start EMA
+    var sum = 0;
+    var limit = Math.min(period, values.length);
+    for (var i = 0; i < limit; i++) {
+      sum += values[i];
+    }
+    var sma = sum / limit;
+
+    for (var i = 0; i < values.length; i++) {
+      if (i < period - 1) {
+        ema.push(values[i]); // Fill with values before period starts
+      } else if (i === period - 1) {
+        ema.push(sma);
+      } else {
+        var currentEma = values[i] * alpha + ema[i - 1] * (1 - alpha);
+        ema.push(currentEma);
+      }
+    }
+    return ema;
+  }
+
   /**
    * Main entry point for the Sector Rotation & Ranking calculation.
    * Runs the entire sequence in-memory to ensure lightning fast execution speed.
@@ -69,7 +104,7 @@ class SectorEngine {
         var close = parseFloat(histData[i][5]);
         var volume = parseFloat(histData[i][7]);
 
-        if (!symbol || isNaN(close)) continue;
+        if (!symbol || isNaN(close) || isNaN(volume)) continue;
 
         if (!stockHistories[symbol]) {
           stockHistories[symbol] = [];
@@ -104,7 +139,7 @@ class SectorEngine {
         stockHistories["NIFTY"] = niftyHistory;
       }
 
-      // 3. Compute Stock Metrics & Scores in-memory
+      // 3. Compute Advanced Stock Metrics & Scores in-memory
       var stockMetricsList = [];
       for (var i = 0; i < activeStocks.length; i++) {
         var symbol = activeStocks[i];
@@ -115,63 +150,83 @@ class SectorEngine {
         var len = history.length;
         var latest = history[len - 1];
 
-        // RVOL (Relative Volume): latest volume vs 20-day average
+        // Extracted Price Closes for EMA calculations
+        var closes = history.map(function(h) { return h.close; });
+        var ema20Values = this.calculateEMA(closes, 20);
+        var ema50Values = this.calculateEMA(closes, 50);
+
+        var latestEma20 = ema20Values[len - 1] || latest.close;
+        var latestEma50 = ema50Values[len - 1] || latest.close;
+
+        // Current Volume
+        var curVol = latest.volume;
+
+        // Volume parameters: 5D, Previous 5D, 20D Average Volume
+        var sumVol5 = 0;
+        var limit5 = Math.min(5, len);
+        for (var j = len - limit5; j < len; j++) {
+          sumVol5 += history[j].volume;
+        }
+        var avgVol5 = sumVol5 / limit5;
+
+        var avgVolPrev5 = avgVol5; // Fallback
+        if (len >= 10) {
+          var sumVolPrev5 = 0;
+          for (var j = len - 10; j < len - 5; j++) {
+            sumVolPrev5 += history[j].volume;
+          }
+          avgVolPrev5 = sumVolPrev5 / 5;
+        }
+
         var sumVol20 = 0;
         var limit20 = Math.min(20, len);
         for (var j = len - limit20; j < len; j++) {
           sumVol20 += history[j].volume;
         }
         var avgVol20 = sumVol20 / limit20;
-        var rvol = avgVol20 > 0 ? (latest.volume / avgVol20) : 1.0;
 
-        // Volume Acceleration: rate of change of 5-day volume
-        var volAcc = 1.0;
-        if (len >= 10) {
-          var sumVolLast5 = 0;
-          var sumVolPrev5 = 0;
-          for (var j = len - 5; j < len; j++) {
-            sumVolLast5 += history[j].volume;
-          }
-          for (var j = len - 10; j < len - 5; j++) {
-            sumVolPrev5 += history[j].volume;
-          }
-          volAcc = sumVolPrev5 > 0 ? (sumVolLast5 / sumVolPrev5) : 1.0;
-        }
+        // RVOL (Relative Volume)
+        var rvol = avgVol20 > 0 ? (curVol / avgVol20) : 1.0;
 
-        // Price Momentum: % change over last 20 days
-        var prev20Index = Math.max(0, len - 20);
-        var priceMom = ((latest.close - history[prev20Index].close) / history[prev20Index].close) * 100;
+        // Volume Acceleration
+        var volAcc = avgVolPrev5 > 0 ? (avgVol5 / avgVolPrev5) : 1.0;
 
-        // Relative Strength vs NIFTY
+        // Returns: 5D and 20D
+        var prev5Index = Math.max(0, len - 6);
+        var prev20Index = Math.max(0, len - 21);
+
+        var ret5 = ((latest.close - history[prev5Index].close) / history[prev5Index].close) * 100;
+        var ret20 = ((latest.close - history[prev20Index].close) / history[prev20Index].close) * 100;
+
+        // Relative Strength vs NIFTY index
         var nLen = niftyHistory.length;
         var nLatest = niftyHistory[nLen - 1];
-        var nPrev20Index = Math.max(0, nLen - 20);
-        var niftyMom = nLen > 0 ? (((nLatest.close - niftyHistory[nPrev20Index].close) / niftyHistory[nPrev20Index].close) * 100) : 0.0;
-        var rsVsNifty = priceMom - niftyMom;
+        var nPrev20Index = Math.max(0, nLen - 21);
+        var niftyRet20 = nLen > 0 ? (((nLatest.close - niftyHistory[nPrev20Index].close) / niftyHistory[nPrev20Index].close) * 100) : 0.0;
+        var rsVsNifty = ret20 - niftyRet20;
 
-        // Trend Breadth: 20-day Simple Moving Average (SMA)
-        var sumClose20 = 0;
-        for (var j = len - limit20; j < len; j++) {
-          sumClose20 += history[j].close;
-        }
-        var sma20 = sumClose20 / limit20;
-        var isAboveSma = latest.close >= sma20;
+        // Stock Breadth indicator: close above 20 EMA
+        var isAboveEma = latest.close >= latestEma20;
 
-        // Unified Stock Rotation Score
-        // Formula: 40% Momentum + 30% RS vs Nifty + 20% RVOL + 10% Trend Breadth
-        var trendBonus = isAboveSma ? 10 : 0;
-        var score = (priceMom * 4.0) + (rsVsNifty * 3.0) + (rvol * 2.0) + trendBonus;
+        // Stock Rotation Score
+        // Formula: 40% 20D Return + 30% RS vs Nifty + 20% RVOL + 10% EMA Trend
+        var emaTrendBonus = isAboveEma ? 10 : 0;
+        var score = (ret20 * 4.0) + (rsVsNifty * 3.0) + (rvol * 2.0) + emaTrendBonus;
 
         stockMetricsList.push({
           symbol: symbol,
           company: symbolToCompany[symbol],
           sector: symbolToSector[symbol],
           price: latest.close,
+          ema20: latestEma20,
+          ema50: latestEma50,
+          volume: curVol,
           rvol: rvol,
           volAcc: volAcc,
-          momentum: priceMom,
+          ret5: ret5,
+          ret20: ret20,
           rsVsNifty: rsVsNifty,
-          isAboveSma: isAboveSma,
+          isAboveEma: isAboveEma,
           score: score
         });
       }
@@ -186,9 +241,10 @@ class SectorEngine {
             scoresSum: 0,
             rvolSum: 0,
             volAccSum: 0,
-            momSum: 0,
+            ret5Sum: 0,
+            ret20Sum: 0,
             rsSum: 0,
-            aboveSmaCount: 0,
+            aboveEmaCount: 0,
             stocks: []
           };
         }
@@ -196,10 +252,11 @@ class SectorEngine {
         s.scoresSum += m.score;
         s.rvolSum += m.rvol;
         s.volAccSum += m.volAcc;
-        s.momSum += m.momentum;
+        s.ret5Sum += m.ret5;
+        s.ret20Sum += m.ret20;
         s.rsSum += m.rsVsNifty;
-        if (m.isAboveSma) {
-          s.aboveSmaCount += 1;
+        if (m.isAboveEma) {
+          s.aboveEmaCount += 1;
         }
         s.stocks.push(m);
       }
@@ -212,23 +269,30 @@ class SectorEngine {
         var avgScore = s.scoresSum / count;
         var avgRvol = s.rvolSum / count;
         var avgVolAcc = s.volAccSum / count;
-        var avgMom = s.momSum / count;
+        var avgRet5 = s.ret5Sum / count;
+        var avgRet20 = s.ret20Sum / count;
         var avgRs = s.rsSum / count;
-        var breadthPct = (s.aboveSmaCount / count) * 100;
+        var breadthPct = (s.aboveEmaCount / count) * 100;
 
         // Sort stocks inside the sector to prioritize leading stocks
         s.stocks.sort(function(a, b) {
           return b.score - a.score;
         });
 
+        // Quantify NEW MONEY INFLOW SCORE (Institutional buying Intensity)
+        // Formula: 40% RVOL + 30% Vol Acceleration + 20% Breadth + 10% Relative Strength vs NIFTY
+        var moneyInflowScore = (avgRvol * 40.0) + (avgVolAcc * 30.0) + ((breadthPct / 100.0) * 20.0) + (avgRs * 10.0);
+
         sectorsList.push({
           name: secName,
           score: avgScore,
           rvol: avgRvol,
           volAcc: avgVolAcc,
-          momentum: avgMom,
+          ret5: avgRet5,
+          ret20: avgRet20,
           rsVsNifty: avgRs,
           breadth: breadthPct,
+          moneyInflowScore: moneyInflowScore,
           stocks: s.stocks
         });
       }
@@ -243,23 +307,22 @@ class SectorEngine {
         // Detect Stage
         var stage = "Stage 4: Lagging";
         if (s.rsVsNifty >= 0) {
-          stage = s.momentum >= 0 ? "Stage 2: Leading" : "Stage 3: Weakening";
+          stage = s.ret20 >= 0 ? "Stage 2: Leading" : "Stage 3: Weakening";
         } else {
           if (s.rsVsNifty >= -3.0) {
-            stage = s.momentum >= 0 ? "Stage 1: Improving" : "Stage 4: Lagging";
+            stage = s.ret20 >= 0 ? "Stage 1: Improving" : "Stage 4: Lagging";
           } else {
-            stage = s.momentum >= 0 ? "Stage 5: Bottoming" : "Stage 4: Lagging";
+            stage = s.ret20 >= 0 ? "Stage 5: Bottoming" : "Stage 4: Lagging";
           }
         }
         s.stage = stage;
 
         // Detect Money Inflow Shift (High RVOL and strong volume acceleration)
         s.moneyInflow = "Neutral";
-        if (s.rvol > 1.3 && s.volAcc > 1.2) {
-          s.moneyInflow = "⚠️ VOL SPIKE";
-        }
-        if (s.rvol > 1.6 && s.momentum > 1.0) {
+        if (s.moneyInflowScore > 100.0) {
           s.moneyInflow = "🔥 STRONG INFLOW";
+        } else if (s.rvol > 1.3 && s.volAcc > 1.1) {
+          s.moneyInflow = "⚠️ VOL SPIKE";
         }
       }
 
@@ -272,7 +335,7 @@ class SectorEngine {
         sectorsList[i].rank = i + 1;
       }
 
-      // 7. Load previous alerts for rotation comparison from Cache or Logs
+      // 7. Load previous alerts for rotation comparison from Cache
       var previousStages = {};
       try {
         var cachedStagesStr = Cache.get("PREV_SECTOR_STAGES");
@@ -304,7 +367,7 @@ class SectorEngine {
           activeAlerts.push({
             type: "MONEY FLOW SHIFT 💰",
             sector: s.name,
-            message: "Heavy institutional money detected! RVOL=" + s.rvol.toFixed(2) + "x with positive momentum!"
+            message: "Institutional money wave in " + s.name + "! Score=" + s.moneyInflowScore.toFixed(1) + " (RVOL=" + s.rvol.toFixed(2) + "x)"
           });
         }
       }
@@ -325,7 +388,7 @@ class SectorEngine {
           parseFloat(s.score.toFixed(2)),
           s.rank,
           s.stage,
-          s.moneyInflow,
+          s.moneyInflow + " (Score " + s.moneyInflowScore.toFixed(0) + ")",
           parseFloat(s.breadth.toFixed(1)),
           parseFloat(s.rsVsNifty.toFixed(2)),
           sAlerts || "None"
@@ -428,6 +491,33 @@ class SectorEngine {
     // Border around Performance Monitor
     sheet.getRange("E5:H13").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
+    // ==========================================
+    // DATA INGESTION MODE HIGHLIGHT CELL (E14:H14)
+    // ==========================================
+    var dataMode = Settings.get("Data Mode", "LIVE").toUpperCase().trim();
+    var modeCell = sheet.getRange("E14:H14");
+    modeCell.merge();
+    if (dataMode === "LIVE") {
+      modeCell.setValue("🟢 INGESTION MODE: LIVE REAL-TIME DATA")
+              .setBackground("#d8f3dc") // light green alert
+              .setFontColor("#1b4332")
+              .setFontWeight("bold")
+              .setFontFamily(fonts.FAMILY)
+              .setFontSize(fonts.SIZE_HEADER)
+              .setHorizontalAlignment("center")
+              .setVerticalAlignment("middle");
+    } else {
+      modeCell.setValue("⚠️ INGESTION MODE: DEMO/MOCK SIMULATION DATA")
+              .setBackground("#f8d7da") // soft red alert
+              .setFontColor("#721c24")
+              .setFontWeight("bold")
+              .setFontFamily(fonts.FAMILY)
+              .setFontSize(fonts.SIZE_HEADER)
+              .setHorizontalAlignment("center")
+              .setVerticalAlignment("middle");
+    }
+    modeCell.setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
+
     // Quick platform guidelines Box (B5:C13)
     var guideBox = sheet.getRange("B5:C13");
     guideBox.merge()
@@ -477,7 +567,7 @@ class SectorEngine {
         s.name,
         parseFloat(s.score.toFixed(2)),
         s.stage,
-        s.moneyInflow,
+        s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + ")",
         parseFloat(s.rsVsNifty.toFixed(2)) + "%",
         parseFloat(s.breadth.toFixed(1)) + "%"
       ]);
@@ -501,15 +591,7 @@ class SectorEngine {
         }
 
         // Apply distinct colors to stages column
-        var stageCell = sheet.getRange(rowNum, 5); // Stage column (Index 5 in 1-based columns under B=2, so 5 is Col E is Rank, F is Name, G is Score, H is Stage)
-        // Wait, let's look at the index:
-        // Col B (2): Rank
-        // Col C (3): Sector Name
-        // Col D (4): Score
-        // Col E (5): Current Stage
-        // Col F (6): Money Flow Inflow
-        // Col G (7): RS vs Nifty (%)
-        // Col H (8): Breadth (%)
+        var stageCell = sheet.getRange(rowNum, 5); // Stage column (Col E is index 5 under 1-based columns)
         var stageText = sectorTableRows[i][3];
         var sBg = colors.BG_ALT;
         if (stageText.indexOf("Leading") !== -1) sBg = colors.STAGE_LEADING;

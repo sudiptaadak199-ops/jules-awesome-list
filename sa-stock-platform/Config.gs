@@ -74,6 +74,7 @@ var Config = {
   // Metadata describing the default configuration variables
   DEFAULT_SETTINGS: [
     ["Setting Key", "Value", "Description", "Last Updated"],
+    ["Data Mode", "LIVE", "Market data ingestion mode: 'LIVE' (real-time UrlFetchApp) or 'MOCK' (simulated).", "2024-01-01"],
     ["Data Source", "Yahoo Finance", "Historical market feed engine (e.g. Yahoo Finance, NSE).", "2024-01-01"],
     ["Update Mode", "Delta", "Stock sync strategy: 'Full' or incremental 'Delta'.", "2024-01-01"],
     ["Retry Count", "3", "Maximum execution attempts before recording failure.", "2024-01-01"],

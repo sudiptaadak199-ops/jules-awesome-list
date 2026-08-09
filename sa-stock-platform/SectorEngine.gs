@@ -124,7 +124,7 @@ class SectorEngine {
       // Benchmark NIFTY history index (NO FABRICATION fallback!)
       var niftyHistory = stockHistories["NIFTY"] || [];
       var benchmarkStatus = "🟢 ACTIVE / OK";
-      if (niftyHistory.length === 0 || niftyHistory.length < 20) {
+      if (niftyHistory.length === 0 || niftyHistory.length < 50) {
         benchmarkStatus = "⚠️ MISSING / INVALID";
       }
 
@@ -139,10 +139,10 @@ class SectorEngine {
 
         var history = stockHistories[symbol] || [];
 
-        // Exclude stocks with insufficient history (< 20 days) from metric calculations
-        if (history.length < 20) {
+        // Exclude stocks with insufficient history (< 50 days to support EMA20/EMA50 metrics correctly)
+        if (history.length < 50) {
           stocksSkipped++;
-          console.warn("Skipping stock [" + symbol + "] due to insufficient history: " + history.length + " rows.");
+          console.warn("Skipping stock [" + symbol + "] due to insufficient history: " + history.length + " rows (required >= 50).");
           continue;
         }
 
@@ -161,35 +161,35 @@ class SectorEngine {
         // Current Volume
         var curVol = latest.volume;
 
-        // Volume parameters: 5D, Previous 5D, 20D Average Volume
-        var sumVol5 = 0;
-        var limit5 = Math.min(5, len);
-        for (var j = len - limit5; j < len; j++) {
-          sumVol5 += history[j].volume;
-        }
-        var avgVol5 = sumVol5 / limit5;
-
-        var avgVolPrev5 = avgVol5; // Fallback
-        if (len >= 10) {
-          var sumVolPrev5 = 0;
-          for (var j = len - 10; j < len - 5; j++) {
-            sumVolPrev5 += history[j].volume;
-          }
-          avgVolPrev5 = sumVolPrev5 / 5;
-        }
-
+        // Volume Baseline: EXCLUDE current day's volume from the 20-day baseline
         var sumVol20 = 0;
-        var limit20 = Math.min(20, len);
-        for (var j = len - limit20; j < len; j++) {
+        var prev20Start = Math.max(0, len - 21);
+        var prev20End = len - 2;
+        var countVol20 = 0;
+        for (var j = prev20Start; j <= prev20End; j++) {
           sumVol20 += history[j].volume;
+          countVol20++;
         }
-        var avgVol20 = sumVol20 / limit20;
+        var avgVol20 = countVol20 > 0 ? (sumVol20 / countVol20) : latest.volume;
 
         // RVOL (Relative Volume)
         var rvol = avgVol20 > 0 ? (curVol / avgVol20) : 1.0;
 
-        // Volume Acceleration
-        var volAcc = avgVolPrev5 > 0 ? (avgVol5 / avgVolPrev5) : 1.0;
+        // Volume Acceleration: COMPUTE using previous completed 5D periods (excluding current day index len-1)
+        // Completed Period 1 (Last 5 completed days): len-6 to len-2
+        // Completed Period 2 (Preceding 5 completed days): len-11 to len-7
+        var volAcc = 1.0;
+        if (len >= 11) {
+          var sumVolLast5 = 0;
+          var sumVolPrev5 = 0;
+          for (var j = len - 6; j <= len - 2; j++) {
+            sumVolLast5 += history[j].volume;
+          }
+          for (var j = len - 11; j <= len - 7; j++) {
+            sumVolPrev5 += history[j].volume;
+          }
+          volAcc = sumVolPrev5 > 0 ? (sumVolLast5 / sumVolPrev5) : 1.0;
+        }
 
         // Returns: 5D and 20D
         var prev5Index = Math.max(0, len - 6);
@@ -522,7 +522,7 @@ class SectorEngine {
     var monitorRows = [
       ["Last Successful Update:", PlatformUtils.formatDate(new Date()) + " " + PlatformUtils.formatTime(new Date())],
       ["Stocks Processed (Sufficient):", monitorStats.stocksProcessed],
-      ["Stocks Skipped (History < 20D):", monitorStats.stocksSkipped],
+      ["Stocks Skipped (History < 50D):", monitorStats.stocksSkipped],
       ["NIFTY Benchmark Status:", monitorStats.benchmarkStatus],
       ["Active Sectors Processed:", monitorStats.sectorsProcessed],
       ["Data Rows Updated / Saved:", monitorStats.dataRowsUpdated],

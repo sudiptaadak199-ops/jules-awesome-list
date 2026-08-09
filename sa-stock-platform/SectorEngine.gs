@@ -17,7 +17,7 @@
 class SectorEngine {
   /**
    * Helper function to calculate Exponential Moving Average (EMA) from an array of values.
-   * alpha = 2 / (N + 1)
+   * alpha = 2 / (period + 1)
    * EMA_t = Price_t * alpha + EMA_y * (1 - alpha)
    * @param {Array<number>} values
    * @param {number} period
@@ -53,6 +53,7 @@ class SectorEngine {
   /**
    * Main entry point for the Sector Rotation & Ranking calculation.
    * Runs the entire sequence in-memory to ensure lightning fast execution speed.
+   * Ensures NO NaN, Infinity, or undefined values reach the Dashboard or Sector History.
    * @param {object} monitorStats - Tracker object for registering execution metrics.
    */
   static runSectorPipeline(monitorStats) {
@@ -174,10 +175,9 @@ class SectorEngine {
 
         // RVOL (Relative Volume)
         var rvol = avgVol20 > 0 ? (curVol / avgVol20) : 1.0;
+        if (isNaN(rvol) || !isFinite(rvol)) rvol = 1.0;
 
         // Volume Acceleration: COMPUTE using previous completed 5D periods (excluding current day index len-1)
-        // Completed Period 1 (Last 5 completed days): len-6 to len-2
-        // Completed Period 2 (Preceding 5 completed days): len-11 to len-7
         var volAcc = 1.0;
         if (len >= 11) {
           var sumVolLast5 = 0;
@@ -190,13 +190,27 @@ class SectorEngine {
           }
           volAcc = sumVolPrev5 > 0 ? (sumVolLast5 / sumVolPrev5) : 1.0;
         }
+        if (isNaN(volAcc) || !isFinite(volAcc)) volAcc = 1.0;
 
-        // Returns: 5D and 20D
+        // Returns: 5D and 20D with safety divide-by-zero checks
         var prev5Index = Math.max(0, len - 6);
         var prev20Index = Math.max(0, len - 21);
 
-        var ret5 = ((latest.close - history[prev5Index].close) / history[prev5Index].close) * 100;
-        var ret20 = ((latest.close - history[prev20Index].close) / history[prev20Index].close) * 100;
+        var p5Close = history[prev5Index] ? history[prev5Index].close : 0.0;
+        var p20Close = history[prev20Index] ? history[prev20Index].close : 0.0;
+
+        var ret5 = 0.0;
+        if (p5Close > 0.0) {
+          ret5 = ((latest.close - p5Close) / p5Close) * 100;
+        }
+
+        var ret20 = 0.0;
+        if (p20Close > 0.0) {
+          ret20 = ((latest.close - p20Close) / p20Close) * 100;
+        }
+
+        if (isNaN(ret5) || !isFinite(ret5)) ret5 = 0.0;
+        if (isNaN(ret20) || !isFinite(ret20)) ret20 = 0.0;
 
         // Relative Strength vs NIFTY index (NO fabrication if missing)
         var rsVsNifty = 0.0;
@@ -204,9 +218,15 @@ class SectorEngine {
           var nLen = niftyHistory.length;
           var nLatest = niftyHistory[nLen - 1];
           var nPrev20Index = Math.max(0, nLen - 21);
-          var niftyRet20 = (((nLatest.close - niftyHistory[nPrev20Index].close) / niftyHistory[nPrev20Index].close) * 100);
+          var np20Close = niftyHistory[nPrev20Index] ? niftyHistory[nPrev20Index].close : 0.0;
+          var niftyRet20 = 0.0;
+          if (np20Close > 0.0) {
+            niftyRet20 = (((nLatest.close - np20Close) / np20Close) * 100);
+          }
+          if (isNaN(niftyRet20) || !isFinite(niftyRet20)) niftyRet20 = 0.0;
           rsVsNifty = ret20 - niftyRet20;
         }
+        if (isNaN(rsVsNifty) || !isFinite(rsVsNifty)) rsVsNifty = 0.0;
 
         // Stock Breadth indicator: close above 20 EMA
         var isAboveEma = latest.close >= latestEma20;
@@ -215,6 +235,7 @@ class SectorEngine {
         // Formula: 40% 20D Return + 30% RS vs Nifty + 20% RVOL + 10% EMA Trend
         var emaTrendBonus = isAboveEma ? 10 : 0;
         var score = (ret20 * 4.0) + (rsVsNifty * 3.0) + (rvol * 2.0) + emaTrendBonus;
+        if (isNaN(score) || !isFinite(score)) score = 0.0;
 
         stockMetricsList.push({
           symbol: symbol,
@@ -284,13 +305,18 @@ class SectorEngine {
               var scoreMatch = inflowStr.match(/\((\d+)\)/);
               var prevNewMoney = scoreMatch ? parseFloat(scoreMatch[1]) : 50.0;
 
+              // Parse previous RVOL from description if possible, or fall back to 1.0
+              var rvolMatch = inflowStr.match(/RVOL=([\d.]+)/);
+              var prevRvol = rvolMatch ? parseFloat(rvolMatch[1]) : 1.0;
+
               prevSnapshotMap[secName] = {
                 score: parseFloat(histRows[i][2]),
                 rank: parseInt(histRows[i][3]),
                 stage: String(histRows[i][4]).trim(),
                 moneyInflowScore: prevNewMoney,
                 breadth: parseFloat(histRows[i][6]),
-                rs: parseFloat(histRows[i][7])
+                rs: parseFloat(histRows[i][7]),
+                rvol: prevRvol
               };
             }
           }
@@ -310,7 +336,14 @@ class SectorEngine {
         var avgRet5 = s.ret5Sum / count;
         var avgRet20 = s.ret20Sum / count;
         var avgRs = s.rsSum / count;
-        var breadthPct = (s.aboveEmaCount / count) * 100;
+        var breadthPct = count > 0 ? ((s.aboveEmaCount / count) * 100) : 0.0;
+
+        if (isNaN(avgScore) || !isFinite(avgScore)) avgScore = 0.0;
+        if (isNaN(avgRvol) || !isFinite(avgRvol)) avgRvol = 1.0;
+        if (isNaN(avgVolAcc) || !isFinite(avgVolAcc)) avgVolAcc = 1.0;
+        if (isNaN(avgRet5) || !isFinite(avgRet5)) avgRet5 = 0.0;
+        if (isNaN(avgRet20) || !isFinite(avgRet20)) avgRet20 = 0.0;
+        if (isNaN(avgRs) || !isFinite(avgRs)) avgRs = 0.0;
 
         // Sort stocks inside the sector to prioritize leading stocks
         s.stocks.sort(function(a, b) {
@@ -321,14 +354,26 @@ class SectorEngine {
         var rawMoneyScore = (avgRvol * 35.0) + (avgVolAcc * 25.0) + ((breadthPct / 100.0) * 25.0) + (avgRs * 15.0);
         // Normalize New Money Score exactly to 0-100!
         var normalizedMoney = Math.min(100.0, Math.max(0.0, (rawMoneyScore / 1.5) * 100.0 / 75.0));
+        if (isNaN(normalizedMoney) || !isFinite(normalizedMoney)) normalizedMoney = 50.0;
 
         // Pull previous values to calculate changes
-        var prev = prevSnapshotMap[secName] || { score: avgScore, rank: 3, stage: "Stage 4: Outflow", moneyInflowScore: normalizedMoney, breadth: breadthPct, rs: avgRs };
+        var prev = prevSnapshotMap[secName] || {
+          score: avgScore,
+          rank: 3, // Initial fallback
+          stage: "OUTFLOW",
+          moneyInflowScore: normalizedMoney,
+          breadth: breadthPct,
+          rvol: avgRvol,
+          rs: avgRs
+        };
 
         var moneyScoreChange = normalizedMoney - prev.moneyInflowScore;
-        var rankChange = prev.rank - 3; // Temporary offset, computed precisely after sorted ranking
         var breadthChange = breadthPct - prev.breadth;
-        var rvolChange = avgRvol - (prev.rvol || avgRvol);
+        var rvolChange = avgRvol - prev.rvol;
+
+        if (isNaN(moneyScoreChange)) moneyScoreChange = 0.0;
+        if (isNaN(breadthChange)) breadthChange = 0.0;
+        if (isNaN(rvolChange)) rvolChange = 0.0;
 
         sectorsList.push({
           name: secName,
@@ -358,7 +403,10 @@ class SectorEngine {
 
       for (var i = 0; i < sectorsList.length; i++) {
         sectorsList[i].rank = i + 1;
-        sectorsList[i].rankChange = sectorsList[i].prevRank - (i + 1); // Positive is Rank Improvement (Rank 4 -> 2 is +2!)
+        // If first run, prevRank will default to current rank (i+1) inside MainOrchestrator fallback
+        var pRank = sectorsList[i].prevRank !== undefined ? sectorsList[i].prevRank : (i + 1);
+        sectorsList[i].rankChange = pRank - (i + 1); // Positive is Rank Improvement (Rank 4 -> 2 is +2!)
+        if (isNaN(sectorsList[i].rankChange)) sectorsList[i].rankChange = 0;
       }
 
       // 6. Refined 6-Stage Rotation State Classifications
@@ -447,7 +495,7 @@ class SectorEngine {
           parseFloat(s.score.toFixed(2)),
           s.rank,
           s.stage,
-          s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + ")",
+          s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | RVOL=" + s.rvol.toFixed(2) + ")",
           parseFloat(s.breadth.toFixed(1)),
           parseFloat(s.rsVsNifty.toFixed(2)),
           sAlerts || "None"

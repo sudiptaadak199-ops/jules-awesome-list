@@ -29,6 +29,7 @@ class DataProvider {
   /**
    * Batch fetches end-of-day daily market data for a list of symbols in parallel using UrlFetchApp.fetchAll().
    * Implements strict validation and incremental data windowing to optimize performance.
+   * NEVER fabricates prices or volume in LIVE mode.
    * @param {Array<string>} symbols - List of active symbols to process.
    * @param {object} lastDatesMap - Mapping of symbol to its last recorded date string in the sheet.
    * @param {object} monitorStats - System monitor tracker object to record diagnostics.

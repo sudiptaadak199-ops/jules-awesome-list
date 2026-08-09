@@ -56,11 +56,14 @@ var Config = {
       ALERT_ERROR: "#f8d7da",    // Soft Red for errors
       INFO_BOX_BG: "#eaf2f8",    // Accent container background
       GOLD_GOLD: "#fcf6bd",      // Warm light gold for highlighting top ranks
-      STAGE_LEADING: "#d8f3dc",   // Light Green
-      STAGE_IMPROVING: "#e2eafc", // Light Blue
-      STAGE_WEAKENING: "#fff3b0", // Light Yellow
-      STAGE_LAGGING: "#f8d7da",   // Light Red
-      STAGE_BOTTOMING: "#f0e6ef"  // Light Purple
+
+      // SIX REFINED ROTATION STATE COLORS
+      STATE_EARLY_INFLOW: "#e2eafc",     // Soft blue-blue
+      STATE_CONFIRMED_INFLOW: "#b7e4c7", // Medium mint green
+      STATE_LEADING: "#d8f3dc",          // Bright green
+      STATE_WEAKENING: "#fff3b0",        // Soft light yellow
+      STATE_OUTFLOW: "#f8d7da",          // Soft red alert
+      STATE_BOTTOMING: "#f0e6ef"         // Soft purple-lavender
     },
     FONTS: {
       FAMILY: "Roboto",

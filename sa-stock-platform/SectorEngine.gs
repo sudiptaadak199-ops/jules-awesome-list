@@ -85,8 +85,6 @@ class SectorEngine {
         }
       }
 
-      monitorStats.stocksProcessed = activeStocks.length;
-
       // 2. Read Historical Data in-memory
       var lastHistRow = histSheet.getLastRow();
       if (lastHistRow <= 1) {
@@ -123,30 +121,32 @@ class SectorEngine {
         });
       }
 
-      // Benchmark NIFTY history index (or fallback if missing)
+      // Benchmark NIFTY history index (NO FABRICATION fallback!)
       var niftyHistory = stockHistories["NIFTY"] || [];
-      if (niftyHistory.length === 0) {
-        // Construct mock Nifty history from RELIANCE / default if missing
-        var refSym = activeStocks[0];
-        var refHist = stockHistories[refSym] || [];
-        for (var i = 0; i < refHist.length; i++) {
-          niftyHistory.push({
-            date: refHist[i].date,
-            close: refHist[i].close * 8.5, // Scale to approximate Nifty level
-            volume: refHist[i].volume
-          });
-        }
-        stockHistories["NIFTY"] = niftyHistory;
+      var benchmarkStatus = "🟢 ACTIVE / OK";
+      if (niftyHistory.length === 0 || niftyHistory.length < 20) {
+        benchmarkStatus = "⚠️ MISSING / INVALID";
       }
+
+      var stocksSufficient = 0;
+      var stocksSkipped = 0;
 
       // 3. Compute Advanced Stock Metrics & Scores in-memory
       var stockMetricsList = [];
       for (var i = 0; i < activeStocks.length; i++) {
         var symbol = activeStocks[i];
+        if (symbol === "NIFTY") continue; // Skip Nifty benchmark itself from stock metrics
+
         var history = stockHistories[symbol] || [];
 
-        if (history.length < 5) continue; // Skip if insufficient data
+        // Exclude stocks with insufficient history (< 20 days) from metric calculations
+        if (history.length < 20) {
+          stocksSkipped++;
+          console.warn("Skipping stock [" + symbol + "] due to insufficient history: " + history.length + " rows.");
+          continue;
+        }
 
+        stocksSufficient++;
         var len = history.length;
         var latest = history[len - 1];
 
@@ -198,12 +198,15 @@ class SectorEngine {
         var ret5 = ((latest.close - history[prev5Index].close) / history[prev5Index].close) * 100;
         var ret20 = ((latest.close - history[prev20Index].close) / history[prev20Index].close) * 100;
 
-        // Relative Strength vs NIFTY index
-        var nLen = niftyHistory.length;
-        var nLatest = niftyHistory[nLen - 1];
-        var nPrev20Index = Math.max(0, nLen - 21);
-        var niftyRet20 = nLen > 0 ? (((nLatest.close - niftyHistory[nPrev20Index].close) / niftyHistory[nPrev20Index].close) * 100) : 0.0;
-        var rsVsNifty = ret20 - niftyRet20;
+        // Relative Strength vs NIFTY index (NO fabrication if missing)
+        var rsVsNifty = 0.0;
+        if (benchmarkStatus === "🟢 ACTIVE / OK") {
+          var nLen = niftyHistory.length;
+          var nLatest = niftyHistory[nLen - 1];
+          var nPrev20Index = Math.max(0, nLen - 21);
+          var niftyRet20 = (((nLatest.close - niftyHistory[nPrev20Index].close) / niftyHistory[nPrev20Index].close) * 100);
+          rsVsNifty = ret20 - niftyRet20;
+        }
 
         // Stock Breadth indicator: close above 20 EMA
         var isAboveEma = latest.close >= latestEma20;
@@ -230,6 +233,10 @@ class SectorEngine {
           score: score
         });
       }
+
+      monitorStats.stocksProcessed = stocksSufficient;
+      monitorStats.stocksSkipped = stocksSkipped;
+      monitorStats.benchmarkStatus = benchmarkStatus;
 
       // 4. Aggregate Stock Metrics by Sector
       var sectorMap = {};
@@ -261,6 +268,37 @@ class SectorEngine {
         s.stocks.push(m);
       }
 
+      // Load previous snapshot history for changes comparison
+      var prevSnapshotMap = {};
+      try {
+        var sHistSheet = ss.getSheetByName(Config.SHEETS.SECTOR_HISTORY);
+        if (sHistSheet && sHistSheet.getLastRow() > 1) {
+          var lastRow = sHistSheet.getLastRow();
+          var histRows = sHistSheet.getRange(2, 1, lastRow - 1, 9).getValues();
+          // Read backwards to capture the most recent unique snapshot of each sector
+          for (var i = histRows.length - 1; i >= 0; i--) {
+            var secName = String(histRows[i][1]).trim();
+            if (secName && !prevSnapshotMap[secName]) {
+              // Parse New Money Score from the Inflow column e.g. "STRONG INFLOW (85)" -> 85
+              var inflowStr = String(histRows[i][5]);
+              var scoreMatch = inflowStr.match(/\((\d+)\)/);
+              var prevNewMoney = scoreMatch ? parseFloat(scoreMatch[1]) : 50.0;
+
+              prevSnapshotMap[secName] = {
+                score: parseFloat(histRows[i][2]),
+                rank: parseInt(histRows[i][3]),
+                stage: String(histRows[i][4]).trim(),
+                moneyInflowScore: prevNewMoney,
+                breadth: parseFloat(histRows[i][6]),
+                rs: parseFloat(histRows[i][7])
+              };
+            }
+          }
+        }
+      } catch (snapshotErr) {
+        console.warn("Failed to load previous snapshots: " + snapshotErr.message);
+      }
+
       var sectorsList = [];
       for (var secName in sectorMap) {
         var s = sectorMap[secName];
@@ -279,9 +317,18 @@ class SectorEngine {
           return b.score - a.score;
         });
 
-        // Quantify NEW MONEY INFLOW SCORE (Institutional buying Intensity)
-        // Formula: 40% RVOL + 30% Vol Acceleration + 20% Breadth + 10% Relative Strength vs NIFTY
-        var moneyInflowScore = (avgRvol * 40.0) + (avgVolAcc * 30.0) + ((breadthPct / 100.0) * 20.0) + (avgRs * 10.0);
+        // Quantify raw Money Inflow Score
+        var rawMoneyScore = (avgRvol * 35.0) + (avgVolAcc * 25.0) + ((breadthPct / 100.0) * 25.0) + (avgRs * 15.0);
+        // Normalize New Money Score exactly to 0-100!
+        var normalizedMoney = Math.min(100.0, Math.max(0.0, (rawMoneyScore / 1.5) * 100.0 / 75.0));
+
+        // Pull previous values to calculate changes
+        var prev = prevSnapshotMap[secName] || { score: avgScore, rank: 3, stage: "Stage 4: Outflow", moneyInflowScore: normalizedMoney, breadth: breadthPct, rs: avgRs };
+
+        var moneyScoreChange = normalizedMoney - prev.moneyInflowScore;
+        var rankChange = prev.rank - 3; // Temporary offset, computed precisely after sorted ranking
+        var breadthChange = breadthPct - prev.breadth;
+        var rvolChange = avgRvol - (prev.rvol || avgRvol);
 
         sectorsList.push({
           name: secName,
@@ -292,47 +339,59 @@ class SectorEngine {
           ret20: avgRet20,
           rsVsNifty: avgRs,
           breadth: breadthPct,
-          moneyInflowScore: moneyInflowScore,
+          moneyInflowScore: normalizedMoney,
+          moneyScoreChange: moneyScoreChange,
+          breadthChange: breadthChange,
+          rvolChange: rvolChange,
+          prevRank: prev.rank,
+          prevStage: prev.stage,
           stocks: s.stocks
         });
       }
 
       monitorStats.sectorsProcessed = sectorsList.length;
 
-      // 5. Classify Sectors and Detect Money Inflow shifts
-      // Classify stages using Sector RS and Momentum
-      for (var i = 0; i < sectorsList.length; i++) {
-        var s = sectorsList[i];
-
-        // Detect Stage
-        var stage = "Stage 4: Lagging";
-        if (s.rsVsNifty >= 0) {
-          stage = s.ret20 >= 0 ? "Stage 2: Leading" : "Stage 3: Weakening";
-        } else {
-          if (s.rsVsNifty >= -3.0) {
-            stage = s.ret20 >= 0 ? "Stage 1: Improving" : "Stage 4: Lagging";
-          } else {
-            stage = s.ret20 >= 0 ? "Stage 5: Bottoming" : "Stage 4: Lagging";
-          }
-        }
-        s.stage = stage;
-
-        // Detect Money Inflow Shift (High RVOL and strong volume acceleration)
-        s.moneyInflow = "Neutral";
-        if (s.moneyInflowScore > 100.0) {
-          s.moneyInflow = "🔥 STRONG INFLOW";
-        } else if (s.rvol > 1.3 && s.volAcc > 1.1) {
-          s.moneyInflow = "⚠️ VOL SPIKE";
-        }
-      }
-
-      // 6. Sector Ranking
+      // 5. Sort Sector Ranking and Compute Rank Changes
       sectorsList.sort(function(a, b) {
         return b.score - a.score;
       });
 
       for (var i = 0; i < sectorsList.length; i++) {
         sectorsList[i].rank = i + 1;
+        sectorsList[i].rankChange = sectorsList[i].prevRank - (i + 1); // Positive is Rank Improvement (Rank 4 -> 2 is +2!)
+      }
+
+      // 6. Refined 6-Stage Rotation State Classifications
+      for (var i = 0; i < sectorsList.length; i++) {
+        var s = sectorsList[i];
+
+        // SIX SEPARATE ROTATION STATES
+        var stage = "OUTFLOW";
+        if (s.moneyInflowScore > 70.0 && s.volAcc > 1.25 && s.breadthChange > 0) {
+          stage = "CONFIRMED INFLOW";
+        } else if (s.score < 50.0 && (s.moneyScoreChange > 15.0 || s.rvolChange > 0.35)) {
+          stage = "EARLY INFLOW";
+        } else if (s.score >= 58.0 && s.rsVsNifty >= 0.0) {
+          stage = "LEADING";
+        } else if (s.score >= 55.0 && (s.ret20 < 0.0 || s.moneyScoreChange < -10.0)) {
+          stage = "WEAKENING";
+        } else if (s.score < 45.0 && s.moneyScoreChange > 5.0 && s.ret5 > 0) {
+          stage = "BOTTOMING";
+        } else {
+          stage = "OUTFLOW";
+        }
+
+        s.stage = stage;
+
+        // Label Money Inflow Status
+        s.moneyInflow = "Neutral";
+        if (s.moneyInflowScore > 75.0) {
+          s.moneyInflow = "🔥 STRONG";
+        } else if (s.moneyInflowScore > 50.0) {
+          s.moneyInflow = "⚠️ RISING";
+        } else {
+          s.moneyInflow = "❄️ FLAT/OUT";
+        }
       }
 
       // 7. Load previous alerts for rotation comparison from Cache
@@ -359,15 +418,15 @@ class SectorEngine {
           activeAlerts.push({
             type: "ROTATION ALERT 🔄",
             sector: s.name,
-            message: "Sector shifted from [" + prevStage + "] to [" + s.stage + "]!"
+            message: "EOD Sector rotation shifted from [" + prevStage + "] to [" + s.stage + "]!"
           });
         }
 
-        if (s.moneyInflow.indexOf("STRONG") !== -1) {
+        if (s.stage === "EARLY INFLOW") {
           activeAlerts.push({
-            type: "MONEY FLOW SHIFT 💰",
+            type: "EARLY INFLOW ⚡",
             sector: s.name,
-            message: "Institutional money wave in " + s.name + "! Score=" + s.moneyInflowScore.toFixed(1) + " (RVOL=" + s.rvol.toFixed(2) + "x)"
+            message: "Fresh capital accumulation detected in [" + s.name + "]! Inflow Score change: +" + s.moneyScoreChange.toFixed(0)
           });
         }
       }
@@ -388,7 +447,7 @@ class SectorEngine {
           parseFloat(s.score.toFixed(2)),
           s.rank,
           s.stage,
-          s.moneyInflow + " (Score " + s.moneyInflowScore.toFixed(0) + ")",
+          s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + ")",
           parseFloat(s.breadth.toFixed(1)),
           parseFloat(s.rsVsNifty.toFixed(2)),
           sAlerts || "None"
@@ -436,7 +495,7 @@ class SectorEngine {
          .setVerticalAlignment("middle");
 
     sheet.getRange("B3:H3").merge()
-         .setValue("Sector Rotation & Institutional Money Flow Analyzer • Real-Time Core Platform")
+         .setValue("Sector Rotation & Institutional Money Flow Analyzer • Daily End-Of-Day Analytics")
          .setFontSize(fonts.SIZE_SUBTITLE)
          .setFontStyle("italic")
          .setFontColor(colors.ACCENT)
@@ -462,17 +521,18 @@ class SectorEngine {
 
     var monitorRows = [
       ["Last Successful Update:", PlatformUtils.formatDate(new Date()) + " " + PlatformUtils.formatTime(new Date())],
-      ["Active Stocks Processed:", monitorStats.stocksProcessed],
+      ["Stocks Processed (Sufficient):", monitorStats.stocksProcessed],
+      ["Stocks Skipped (History < 20D):", monitorStats.stocksSkipped],
+      ["NIFTY Benchmark Status:", monitorStats.benchmarkStatus],
       ["Active Sectors Processed:", monitorStats.sectorsProcessed],
       ["Data Rows Updated / Saved:", monitorStats.dataRowsUpdated],
-      ["API Requests / Retries:", monitorStats.apiRequests + " / 0"],
-      ["Failed API Feed Outages:", monitorStats.failedRequests],
+      ["API Requests / Failures:", monitorStats.apiRequests + " / " + monitorStats.failedRequests],
       ["Execution Compute Speed:", executionSec + " sec"],
       ["System Database Status:", statusText]
     ];
 
-    sheet.getRange("E6:F13").setValues(monitorRows.map(function(r) { return [r[0], ""]; }));
-    sheet.getRange("E6:E13").setFontWeight("bold").setFontFamily(fonts.FAMILY).setFontSize(fonts.SIZE_BODY);
+    sheet.getRange("E6:F14").setValues(monitorRows.map(function(r) { return [r[0], ""]; }));
+    sheet.getRange("E6:E14").setFontWeight("bold").setFontFamily(fonts.FAMILY).setFontSize(fonts.SIZE_BODY);
 
     // Set actual values next to keys
     for (var i = 0; i < monitorRows.length; i++) {
@@ -489,16 +549,16 @@ class SectorEngine {
     }
 
     // Border around Performance Monitor
-    sheet.getRange("E5:H13").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
+    sheet.getRange("E5:H14").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
     // ==========================================
-    // DATA INGESTION MODE HIGHLIGHT CELL (E14:H14)
+    // DATA INGESTION MODE HIGHLIGHT CELL (E15:H15)
     // ==========================================
     var dataMode = Settings.get("Data Mode", "LIVE").toUpperCase().trim();
-    var modeCell = sheet.getRange("E14:H14");
+    var modeCell = sheet.getRange("E15:H15");
     modeCell.merge();
     if (dataMode === "LIVE") {
-      modeCell.setValue("🟢 INGESTION MODE: LIVE REAL-TIME DATA")
+      modeCell.setValue("🟢 LIVE DAILY MARKET DATA (EOD)")
               .setBackground("#d8f3dc") // light green alert
               .setFontColor("#1b4332")
               .setFontWeight("bold")
@@ -518,12 +578,12 @@ class SectorEngine {
     }
     modeCell.setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
-    // Quick platform guidelines Box (B5:C13)
-    var guideBox = sheet.getRange("B5:C13");
+    // Quick platform guidelines Box (B5:C14)
+    var guideBox = sheet.getRange("B5:C14");
     guideBox.merge()
             .setValue("ZERO-MANUAL-WORK PRINCIPLE:\n\n" +
                       "• Open this Dashboard to instantly check where institutional capital is entering NSE.\n" +
-                      "• The platform automatically tracks prices, computes RVOL, ranks sectors, and triggers alerts.\n" +
+                      "• The platform automatically tracks EOD daily prices, computes RVOL, ranks sectors, and triggers alerts.\n" +
                       "• Change update delays or trigger periods inside the Settings sheet.\n" +
                       "• Under the hood, the calculation engine runs on pure in-memory matrix computations for rapid speed.")
             .setBackground(colors.INFO_BOX_BG)
@@ -535,8 +595,8 @@ class SectorEngine {
     guideBox.setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
 
-    // 2. Prioritized Sector Leaderboard (B15:H26)
-    var leadStartRow = 15;
+    // 2. Prioritized Sector Leaderboard (B16:H27)
+    var leadStartRow = 16;
     var leadHeader = sheet.getRange(leadStartRow, 2, 1, 7);
     leadHeader.merge()
               .setValue("🏆 PRIORITIZED SECTOR ROTATION LEADERBOARD (RANKED BY INSTITUTIONAL SCORE)")
@@ -548,7 +608,7 @@ class SectorEngine {
               .setHorizontalAlignment("center")
               .setVerticalAlignment("middle");
 
-    var leadColumns = ["Rank", "Sector Name", "Score", "Current Stage", "Money Flow Inflow", "RS vs Nifty (%)", "Breadth (%)"];
+    var leadColumns = ["Rank (Chg)", "Sector Name", "Rotation Score", "Rotation Stage", "New Money Inflow", "RS vs Nifty (%)", "Breadth (%)"];
     var leadColRange = sheet.getRange(leadStartRow + 1, 2, 1, 7);
     leadColRange.setValues([leadColumns])
                 .setBackground(colors.ACCENT)
@@ -562,12 +622,27 @@ class SectorEngine {
     var sectorTableRows = [];
     for (var i = 0; i < sectorsList.length; i++) {
       var s = sectorsList[i];
+
+      // Format Rank Change e.g. "2 (+1)" or "4 (-2)" or "3 (=)"
+      var rankChgStr = s.rank;
+      if (s.rankChange > 0) {
+        rankChgStr += " (▲" + s.rankChange + ")";
+      } else if (s.rankChange < 0) {
+        rankChgStr += " (▼" + Math.abs(s.rankChange) + ")";
+      } else {
+        rankChgStr += " (=)";
+      }
+
+      // Format Money Inflow with Normalized Score Change
+      var chgSymbol = s.moneyScoreChange >= 0 ? "+" : "";
+      var inflowStr = s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | " + chgSymbol + s.moneyScoreChange.toFixed(0) + ")";
+
       sectorTableRows.push([
-        s.rank,
+        rankChgStr,
         s.name,
         parseFloat(s.score.toFixed(2)),
         s.stage,
-        s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + ")",
+        inflowStr,
         parseFloat(s.rsVsNifty.toFixed(2)) + "%",
         parseFloat(s.breadth.toFixed(1)) + "%"
       ]);
@@ -590,15 +665,17 @@ class SectorEngine {
           rRange.setBackground(colors.BG_ALT);
         }
 
-        // Apply distinct colors to stages column
+        // Apply distinct colors to the 6 separate rotation states
         var stageCell = sheet.getRange(rowNum, 5); // Stage column (Col E is index 5 under 1-based columns)
         var stageText = sectorTableRows[i][3];
         var sBg = colors.BG_ALT;
-        if (stageText.indexOf("Leading") !== -1) sBg = colors.STAGE_LEADING;
-        else if (stageText.indexOf("Improving") !== -1) sBg = colors.STAGE_IMPROVING;
-        else if (stageText.indexOf("Weakening") !== -1) sBg = colors.STAGE_WEAKENING;
-        else if (stageText.indexOf("Lagging") !== -1) sBg = colors.STAGE_LAGGING;
-        else if (stageText.indexOf("Bottoming") !== -1) sBg = colors.STAGE_BOTTOMING;
+
+        if (stageText === "LEADING") sBg = colors.STATE_LEADING;
+        else if (stageText === "EARLY INFLOW") sBg = colors.STATE_EARLY_INFLOW;
+        else if (stageText === "CONFIRMED INFLOW") sBg = colors.STATE_CONFIRMED_INFLOW;
+        else if (stageText === "WEAKENING") sBg = colors.STATE_WEAKENING;
+        else if (stageText === "OUTFLOW") sBg = colors.STATE_OUTFLOW;
+        else if (stageText === "BOTTOMING") sBg = colors.STATE_BOTTOMING;
 
         stageCell.setBackground(sBg).setFontWeight("bold");
 
@@ -720,7 +797,7 @@ class SectorEngine {
 
     for (var i = 0; i < alertRows.length; i++) {
       var rowNum = nextStartRow + 2 + i;
-      if (alertRows[i][0].indexOf("MONEY") !== -1) {
+      if (alertRows[i][0].indexOf("MONEY") !== -1 || alertRows[i][0].indexOf("EARLY") !== -1) {
         sheet.getRange(rowNum, 5, 1, 4).setBackground("#fff3b0"); // Highlight golden warning
       } else if (alertRows[i][0].indexOf("ROTATION") !== -1) {
         sheet.getRange(rowNum, 5, 1, 4).setBackground("#e2eafc"); // Soft Blue highlight

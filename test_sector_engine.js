@@ -182,7 +182,7 @@ const stockMasterValues = [
 ];
 ss.insertSheet("Stock Master").values = stockMasterValues;
 
-// Generate Mock Historical Data (50 Days for each stock + NIFTY)
+// Generate Mock Historical Data (60 Days for each stock + NIFTY)
 const histSheet = ss.insertSheet("Historical Data");
 histSheet.values = [
   ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
@@ -212,12 +212,35 @@ for (let d = 60; d >= 1; d--) {
   }
 }
 
-// Add a dummy Sector History to simulate previous runs
+// Generate rich mock timeline inside Sector History
+// We populate 6 days of history backwards (Day -1, Day -2, Day -3, Day -4, Day -5, Day -6)
 const sHistSheet = ss.insertSheet("Sector History");
 sHistSheet.values = [
   ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
-  ["2026-08-01", "Energy", "55.0", "1", "LEADING", "🔥 STRONG (75 | RVOL=1.25)", "100.0", "2.5", "None"],
-  ["2026-08-01", "Technology", "42.0", "2", "BOTTOMING", "❄️ FLAT/OUT (35 | RVOL=0.85)", "0.0", "-4.5", "None"]
+
+  // Day -6 (oldest)
+  ["2026-08-01", "Energy", "50.0", "1", "OUTFLOW", "❄️ FLAT/OUT (50 | RVOL=0.90)", "50.0", "0.0", "None"],
+  ["2026-08-01", "Technology", "40.0", "2", "OUTFLOW", "❄️ FLAT/OUT (40 | RVOL=0.80)", "50.0", "0.0", "None"],
+
+  // Day -5
+  ["2026-08-02", "Energy", "51.0", "1", "OUTFLOW", "❄️ FLAT/OUT (52 | RVOL=0.95)", "50.0", "0.5", "None"],
+  ["2026-08-02", "Technology", "40.5", "2", "OUTFLOW", "❄️ FLAT/OUT (41 | RVOL=0.81)", "50.0", "-0.1", "None"],
+
+  // Day -4
+  ["2026-08-03", "Energy", "52.0", "1", "BOTTOMING", "❄️ FLAT/OUT (55 | RVOL=1.00)", "50.0", "1.0", "None"],
+  ["2026-08-03", "Technology", "41.0", "2", "OUTFLOW", "❄️ FLAT/OUT (42 | RVOL=0.82)", "50.0", "-0.2", "None"],
+
+  // Day -3
+  ["2026-08-04", "Energy", "53.0", "1", "BOTTOMING", "❄️ FLAT/OUT (60 | RVOL=1.10)", "50.0", "1.5", "None"],
+  ["2026-08-04", "Technology", "41.5", "2", "OUTFLOW", "❄️ FLAT/OUT (43 | RVOL=0.83)", "50.0", "-0.3", "None"],
+
+  // Day -2
+  ["2026-08-05", "Energy", "54.0", "1", "LEADING", "⚠️ RISING (65 | RVOL=1.15)", "100.0", "2.0", "None"],
+  ["2026-08-05", "Technology", "42.0", "2", "BOTTOMING", "❄️ FLAT/OUT (44 | RVOL=0.84)", "50.0", "-0.4", "None"],
+
+  // Day -1 (yesterday)
+  ["2026-08-06", "Energy", "55.0", "1", "LEADING", "🔥 STRONG (70 | RVOL=1.20)", "100.0", "2.5", "None"],
+  ["2026-08-06", "Technology", "42.5", "2", "BOTTOMING", "❄️ FLAT/OUT (45 | RVOL=0.85)", "50.0", "-0.5", "None"]
 ];
 
 // Initialize Settings
@@ -233,51 +256,106 @@ const monitorStats = {
   failedRequests: 0
 };
 
-console.log('--- RUNNING SECTOR PIPELINE SIMULATION ---');
+console.log('--- RUNNING UPGRADED SECTOR PIPELINE ---');
 SectorEngine.runSectorPipeline(monitorStats);
 console.log('--- PIPELINE EXECUTION COMPLETED ---');
 
 // Validate results
-console.log('\n--- DETAILED SECTOR METRICS & CHANGES ---');
+console.log('\n--- UPGRADED DETAILED SECTOR METRICS & MULTI-PERIOD CHANGES ---');
 for (const sector of capturedSectorsList) {
   console.log(`Sector: ${sector.name}`);
-  console.log(`  Score: ${sector.score.toFixed(2)}`);
-  console.log(`  Money Inflow Score: ${sector.moneyInflowScore.toFixed(2)}`);
-  console.log(`  Money Score Change: ${sector.moneyScoreChange.toFixed(2)}`);
-  console.log(`  RVOL Change: ${sector.rvolChange.toFixed(4)}`);
-  console.log(`  Breadth Change: ${sector.breadthChange.toFixed(2)}%`);
-  console.log(`  Rank Change: ${sector.rankChange}`);
-  console.log(`  Stage: ${sector.stage}`);
+  console.log(`  Sector Money Score: ${sector.score.toFixed(2)}`);
+  console.log(`  New Money Inflow Proxy Score: ${sector.moneyInflowScore.toFixed(2)}`);
+
+  console.log(`  1D Inflow Change: ${sector.inflowChg1D.toFixed(2)} (Expected vs Day-1)`);
+  console.log(`  3D Inflow Change: ${sector.inflowChg3D.toFixed(2)} (Expected vs Day-3)`);
+  console.log(`  5D Inflow Change: ${sector.inflowChg5D.toFixed(2)} (Expected vs Day-5)`);
+
+  console.log(`  1D Breadth Change: ${sector.breadthChg1D.toFixed(2)}%`);
+  console.log(`  3D Breadth Change: ${sector.breadthChg3D.toFixed(2)}%`);
+  console.log(`  5D Breadth Change: ${sector.breadthChg5D.toFixed(2)}%`);
+
+  console.log(`  1D RVOL Change: ${sector.rvolChg1D.toFixed(4)}`);
+  console.log(`  3D RVOL Change: ${sector.rvolChg3D.toFixed(4)}`);
+  console.log(`  5D RVOL Change: ${sector.rvolChg5D.toFixed(4)}`);
+
+  console.log(`  Capital Rotation Stage: ${sector.stage}`);
 }
 
-// Assertions to check that previous values were parsed correctly (meaning, moneyScoreChange is not just using a 50.0 fallback)
+// Assertions to verify multi-period change mathematics
 const energySector = capturedSectorsList.find(s => s.name === 'Energy');
 const techSector = capturedSectorsList.find(s => s.name === 'Technology');
 
-// Since the mock historical value for Energy is 75 and for Tech is 35, let's verify if they were subtracted correctly:
-console.log('\n--- ASSERTING REGEX ACCURACY ---');
+console.log('\n--- ASSERTING MULTI-PERIOD CHANGE ACCURACY ---');
 if (energySector) {
-  const expectedChange = energySector.moneyInflowScore - 75.0;
-  const actualChange = energySector.moneyScoreChange;
-  console.log(`Energy expected change (vs 75.0): ${expectedChange.toFixed(4)} | Actual change: ${actualChange.toFixed(4)}`);
-  if (Math.abs(expectedChange - actualChange) < 0.0001) {
-    console.log('✅ Energy Inflow Score Change correctly computed from parsed history (not defaulting to 50.0)!');
+  // Let's assert:
+  // 1D Inflow Change: s.moneyInflowScore - Day-1 (which was 70.0)
+  const expected1D = energySector.moneyInflowScore - 70.0;
+  const actual1D = energySector.inflowChg1D;
+  console.log(`Energy 1D Inflow Change: expected ${expected1D.toFixed(4)} | actual ${actual1D.toFixed(4)}`);
+  if (Math.abs(expected1D - actual1D) < 0.0001) {
+    console.log('✅ Energy 1D Change Assert Passed!');
   } else {
-    console.error('❌ Regex parse failed: Energy change is not matched!');
+    console.error('❌ Energy 1D Change Assert Failed!');
+    process.exit(1);
+  }
+
+  // 3D Inflow Change: s.moneyInflowScore - Day-3 (which was 60.0)
+  const expected3D = energySector.moneyInflowScore - 60.0;
+  const actual3D = energySector.inflowChg3D;
+  console.log(`Energy 3D Inflow Change: expected ${expected3D.toFixed(4)} | actual ${actual3D.toFixed(4)}`);
+  if (Math.abs(expected3D - actual3D) < 0.0001) {
+    console.log('✅ Energy 3D Change Assert Passed!');
+  } else {
+    console.error('❌ Energy 3D Change Assert Failed!');
+    process.exit(1);
+  }
+
+  // 5D Inflow Change: s.moneyInflowScore - Day-5 (which was 52.0)
+  const expected5D = energySector.moneyInflowScore - 52.0;
+  const actual5D = energySector.inflowChg5D;
+  console.log(`Energy 5D Inflow Change: expected ${expected5D.toFixed(4)} | actual ${actual5D.toFixed(4)}`);
+  if (Math.abs(expected5D - actual5D) < 0.0001) {
+    console.log('✅ Energy 5D Change Assert Passed!');
+  } else {
+    console.error('❌ Energy 5D Change Assert Failed!');
     process.exit(1);
   }
 }
 
 if (techSector) {
-  const expectedChange = techSector.moneyInflowScore - 35.0;
-  const actualChange = techSector.moneyScoreChange;
-  console.log(`Technology expected change (vs 35.0): ${expectedChange.toFixed(4)} | Actual change: ${actualChange.toFixed(4)}`);
-  if (Math.abs(expectedChange - actualChange) < 0.0001) {
-    console.log('✅ Technology Inflow Score Change correctly computed from parsed history (not defaulting to 50.0)!');
+  // 1D Inflow Change: s.moneyInflowScore - Day-1 (which was 45.0)
+  const expected1D = techSector.moneyInflowScore - 45.0;
+  const actual1D = techSector.inflowChg1D;
+  console.log(`Technology 1D Inflow Change: expected ${expected1D.toFixed(4)} | actual ${actual1D.toFixed(4)}`);
+  if (Math.abs(expected1D - actual1D) < 0.0001) {
+    console.log('✅ Technology 1D Change Assert Passed!');
   } else {
-    console.error('❌ Regex parse failed: Technology change is not matched!');
+    console.error('❌ Technology 1D Change Assert Failed!');
+    process.exit(1);
+  }
+
+  // 3D Inflow Change: s.moneyInflowScore - Day-3 (which was 43.0)
+  const expected3D = techSector.moneyInflowScore - 43.0;
+  const actual3D = techSector.inflowChg3D;
+  console.log(`Technology 3D Inflow Change: expected ${expected3D.toFixed(4)} | actual ${actual3D.toFixed(4)}`);
+  if (Math.abs(expected3D - actual3D) < 0.0001) {
+    console.log('✅ Technology 3D Change Assert Passed!');
+  } else {
+    console.error('❌ Technology 3D Change Assert Failed!');
+    process.exit(1);
+  }
+
+  // 5D Inflow Change: s.moneyInflowScore - Day-5 (which was 41.0)
+  const expected5D = techSector.moneyInflowScore - 41.0;
+  const actual5D = techSector.inflowChg5D;
+  console.log(`Technology 5D Inflow Change: expected ${expected5D.toFixed(4)} | actual ${actual5D.toFixed(4)}`);
+  if (Math.abs(expected5D - actual5D) < 0.0001) {
+    console.log('✅ Technology 5D Change Assert Passed!');
+  } else {
+    console.error('❌ Technology 5D Change Assert Failed!');
     process.exit(1);
   }
 }
 
-console.log('\nSUCCESS: All assertions passed completely!');
+console.log('\nSUCCESS: Upgraded Sector Rotation Engine test passed flawlessly!');

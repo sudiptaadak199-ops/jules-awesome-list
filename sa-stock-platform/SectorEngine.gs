@@ -6,10 +6,10 @@
  * Implements full 14-step architecture:
  * 1. Read master listings and historical pricing data in-memory.
  * 2. Calculate stock-level technical metrics (EMA 20, EMA 50, RVOL, Vol Acceleration, Returns, Trend Breadth, and RS vs Nifty).
- * 3. Formulate individual Stock Rotation Scores and New Money Inflow Scores.
- * 4. Aggregate metrics by sector.
- * 5. Classify sectors into five distinct stages.
- * 6. Detect New Money Inflows and stage rotation shifts.
+ * 3. Formulate individual Stock Money Scores and New Money Inflow Proxy scores.
+ * 4. Aggregate metrics by sector and track 1D / 3D / 5D changes from Sector History.
+ * 5. Classify sectors into six distinct rotation stages (Capital Rotation Proxy).
+ * 6. Detect New Money Inflows and stage rotation shifts (State Transitions).
  * 7. Rank sectors and prioritize top-performing stocks.
  * 8. Log active alert logs, store Sector History records, and render a prioritized Dashboard and Performance Monitor.
  */
@@ -247,13 +247,13 @@ class SectorEngine {
         }
         if (isNaN(rsVsNifty) || !isFinite(rsVsNifty)) rsVsNifty = 0.0;
 
-        // Stock Breadth indicator: close above 20 EMA
-        var isAboveEma = latest.close >= latestEma20;
+        // Stock Breadth indicators
+        var isAboveEma20 = latest.close >= latestEma20;
+        var isAboveEma50 = latest.close >= latestEma50;
 
-        // Stock Rotation Score
-        // Formula: 40% 20D Return + 30% RS vs Nifty + 20% RVOL + 10% EMA Trend
-        var emaTrendBonus = isAboveEma ? 10 : 0;
-        var score = (ret20 * 4.0) + (rsVsNifty * 3.0) + (rvol * 2.0) + emaTrendBonus;
+        // Stock Money Score (Proxy for capital accumulation/volume breakout)
+        // Combined Score: 30% RS vs Nifty, 30% 20D momentum, 20% RVOL, 10% Vol Acceleration, 10% Trend Breadth
+        var score = (rsVsNifty * 3.0) + (ret20 * 3.0) + (rvol * 2.0) + (volAcc * 1.0) + (isAboveEma20 ? 10 : 0);
         if (isNaN(score) || !isFinite(score)) score = 0.0;
 
         stockMetricsList.push({
@@ -269,7 +269,8 @@ class SectorEngine {
           ret5: ret5,
           ret20: ret20,
           rsVsNifty: rsVsNifty,
-          isAboveEma: isAboveEma,
+          isAboveEma20: isAboveEma20,
+          isAboveEma50: isAboveEma50,
           score: score
         });
       }
@@ -291,7 +292,8 @@ class SectorEngine {
             ret5Sum: 0,
             ret20Sum: 0,
             rsSum: 0,
-            aboveEmaCount: 0,
+            aboveEma20Count: 0,
+            aboveEma50Count: 0,
             stocks: []
           };
         }
@@ -302,46 +304,52 @@ class SectorEngine {
         s.ret5Sum += m.ret5;
         s.ret20Sum += m.ret20;
         s.rsSum += m.rsVsNifty;
-        if (m.isAboveEma) {
-          s.aboveEmaCount += 1;
+        if (m.isAboveEma20) {
+          s.aboveEma20Count += 1;
+        }
+        if (m.isAboveEma50) {
+          s.aboveEma50Count += 1;
         }
         s.stocks.push(m);
       }
 
-      // Load previous snapshot history for changes comparison
-      var prevSnapshotMap = {};
+      // Load sector historical timelines for 1D, 3D, 5D change analysis
+      var sectorHistoryTimelines = {}; // { secName: [ {score, inflowScore, breadth, rvol, stage}, ... ] }
       try {
         var sHistSheet = ss.getSheetByName(Config.SHEETS.SECTOR_HISTORY);
         if (sHistSheet && sHistSheet.getLastRow() > 1) {
           var lastRow = sHistSheet.getLastRow();
           var histRows = sHistSheet.getRange(2, 1, lastRow - 1, 9).getValues();
-          // Read backwards to capture the most recent unique snapshot of each sector
+
+          // Read backwards (latest first) and accumulate history timeline per sector
           for (var i = histRows.length - 1; i >= 0; i--) {
             var secName = String(histRows[i][1]).trim();
-            if (secName && !prevSnapshotMap[secName]) {
-              // Parse New Money Score from the Inflow column e.g. "STRONG INFLOW (85)" -> 85
-              var inflowStr = String(histRows[i][5]);
-              var scoreMatch = inflowStr.match(/\(\s*(\d+)/);
-              var prevNewMoney = scoreMatch ? parseFloat(scoreMatch[1]) : 50.0;
+            if (!secName) continue;
 
-              // Parse previous RVOL from description if possible, or fall back to 1.0
-              var rvolMatch = inflowStr.match(/RVOL=([\d.]+)/);
-              var prevRvol = rvolMatch ? parseFloat(rvolMatch[1]) : 1.0;
-
-              prevSnapshotMap[secName] = {
-                score: parseFloat(histRows[i][2]),
-                rank: parseInt(histRows[i][3]),
-                stage: String(histRows[i][4]).trim(),
-                moneyInflowScore: prevNewMoney,
-                breadth: parseFloat(histRows[i][6]),
-                rs: parseFloat(histRows[i][7]),
-                rvol: prevRvol
-              };
+            if (!sectorHistoryTimelines[secName]) {
+              sectorHistoryTimelines[secName] = [];
             }
+
+            var inflowStr = String(histRows[i][5]);
+            var scoreMatch = inflowStr.match(/\(\s*(\d+)/);
+            var prevInflowScore = scoreMatch ? parseFloat(scoreMatch[1]) : 50.0;
+
+            var rvolMatch = inflowStr.match(/RVOL=([\d.]+)/);
+            var prevRvol = rvolMatch ? parseFloat(rvolMatch[1]) : 1.0;
+
+            sectorHistoryTimelines[secName].push({
+              score: parseFloat(histRows[i][2]) || 0.0,
+              rank: parseInt(histRows[i][3]) || 1,
+              stage: String(histRows[i][4]).trim(),
+              moneyInflowScore: prevInflowScore,
+              breadth: parseFloat(histRows[i][6]) || 50.0,
+              rs: parseFloat(histRows[i][7]) || 0.0,
+              rvol: prevRvol
+            });
           }
         }
       } catch (snapshotErr) {
-        console.warn("Failed to load previous snapshots: " + snapshotErr.message);
+        console.warn("Failed to load historical timelines: " + snapshotErr.message);
       }
 
       var sectorsList = [];
@@ -355,7 +363,7 @@ class SectorEngine {
         var avgRet5 = s.ret5Sum / count;
         var avgRet20 = s.ret20Sum / count;
         var avgRs = s.rsSum / count;
-        var breadthPct = count > 0 ? ((s.aboveEmaCount / count) * 100) : 0.0;
+        var breadthPct = count > 0 ? ((s.aboveEma20Count / count) * 100) : 0.0;
 
         if (isNaN(avgScore) || !isFinite(avgScore)) avgScore = 0.0;
         if (isNaN(avgRvol) || !isFinite(avgRvol)) avgRvol = 1.0;
@@ -364,51 +372,81 @@ class SectorEngine {
         if (isNaN(avgRet20) || !isFinite(avgRet20)) avgRet20 = 0.0;
         if (isNaN(avgRs) || !isFinite(avgRs)) avgRs = 0.0;
 
-        // Sort stocks inside the sector to prioritize leading stocks
+        // Sort stocks inside the sector by Individual Stock Money Score
         s.stocks.sort(function(a, b) {
           return b.score - a.score;
         });
 
-        // Quantify raw Money Inflow Score
+        // Compute dedicated New Money Inflow Score
         var rawMoneyScore = (avgRvol * 35.0) + (avgVolAcc * 25.0) + ((breadthPct / 100.0) * 25.0) + (avgRs * 15.0);
-        // Normalize New Money Score exactly to 0-100!
         var normalizedMoney = Math.min(100.0, Math.max(0.0, (rawMoneyScore / 1.5) * 100.0 / 75.0));
         if (isNaN(normalizedMoney) || !isFinite(normalizedMoney)) normalizedMoney = 50.0;
 
-        // Pull previous values to calculate changes
-        var prev = prevSnapshotMap[secName] || {
-          score: avgScore,
-          rank: 3, // Initial fallback
-          stage: "OUTFLOW",
-          moneyInflowScore: normalizedMoney,
-          breadth: breadthPct,
-          rvol: avgRvol,
-          rs: avgRs
+        // Multi-period change extraction (1D, 3D, 5D)
+        var timeline = sectorHistoryTimelines[secName] || [];
+
+        var getHistoryField = function(timeline, snapshotOffset, fieldName, currentFallbackValue) {
+          if (timeline.length > snapshotOffset) {
+            return timeline[snapshotOffset][fieldName];
+          }
+          return currentFallbackValue;
         };
 
-        var moneyScoreChange = normalizedMoney - prev.moneyInflowScore;
-        var breadthChange = breadthPct - prev.breadth;
-        var rvolChange = avgRvol - prev.rvol;
+        // Extract historical snapshot references
+        var prev1Inflow = getHistoryField(timeline, 0, "moneyInflowScore", normalizedMoney);
+        var prev3Inflow = getHistoryField(timeline, 2, "moneyInflowScore", normalizedMoney);
+        var prev5Inflow = getHistoryField(timeline, 4, "moneyInflowScore", normalizedMoney);
 
-        if (isNaN(moneyScoreChange)) moneyScoreChange = 0.0;
-        if (isNaN(breadthChange)) breadthChange = 0.0;
-        if (isNaN(rvolChange)) rvolChange = 0.0;
+        var prev1Breadth = getHistoryField(timeline, 0, "breadth", breadthPct);
+        var prev3Breadth = getHistoryField(timeline, 2, "breadth", breadthPct);
+        var prev5Breadth = getHistoryField(timeline, 4, "breadth", breadthPct);
+
+        var prev1Rvol = getHistoryField(timeline, 0, "rvol", avgRvol);
+        var prev3Rvol = getHistoryField(timeline, 2, "rvol", avgRvol);
+        var prev5Rvol = getHistoryField(timeline, 4, "rvol", avgRvol);
+
+        var prevStage = getHistoryField(timeline, 0, "stage", "OUTFLOW");
+        var prevRank = getHistoryField(timeline, 0, "rank", 1);
+
+        // Compute Delta Shifts
+        var inflowChg1D = normalizedMoney - prev1Inflow;
+        var inflowChg3D = normalizedMoney - prev3Inflow;
+        var inflowChg5D = normalizedMoney - prev5Inflow;
+
+        var breadthChg1D = breadthPct - prev1Breadth;
+        var breadthChg3D = breadthPct - prev3Breadth;
+        var breadthChg5D = breadthPct - prev5Breadth;
+
+        var rvolChg1D = avgRvol - prev1Rvol;
+        var rvolChg3D = avgRvol - prev3Rvol;
+        var rvolChg5D = avgRvol - prev5Rvol;
 
         sectorsList.push({
           name: secName,
-          score: avgScore,
+          score: avgScore, // Sector Money Score
           rvol: avgRvol,
           volAcc: avgVolAcc,
           ret5: avgRet5,
           ret20: avgRet20,
           rsVsNifty: avgRs,
           breadth: breadthPct,
-          moneyInflowScore: normalizedMoney,
-          moneyScoreChange: moneyScoreChange,
-          breadthChange: breadthChange,
-          rvolChange: rvolChange,
-          prevRank: prev.rank,
-          prevStage: prev.stage,
+          moneyInflowScore: normalizedMoney, // New Money Inflow Proxy Score
+
+          // Multi-period Change parameters
+          inflowChg1D: inflowChg1D,
+          inflowChg3D: inflowChg3D,
+          inflowChg5D: inflowChg5D,
+
+          breadthChg1D: breadthChg1D,
+          breadthChg3D: breadthChg3D,
+          breadthChg5D: breadthChg5D,
+
+          rvolChg1D: rvolChg1D,
+          rvolChg3D: rvolChg3D,
+          rvolChg5D: rvolChg5D,
+
+          prevRank: prevRank,
+          prevStage: prevStage,
           stocks: s.stocks
         });
       }
@@ -422,27 +460,25 @@ class SectorEngine {
 
       for (var i = 0; i < sectorsList.length; i++) {
         sectorsList[i].rank = i + 1;
-        // If first run, prevRank will default to current rank (i+1) inside MainOrchestrator fallback
         var pRank = sectorsList[i].prevRank !== undefined ? sectorsList[i].prevRank : (i + 1);
-        sectorsList[i].rankChange = pRank - (i + 1); // Positive is Rank Improvement (Rank 4 -> 2 is +2!)
+        sectorsList[i].rankChange = pRank - (i + 1);
         if (isNaN(sectorsList[i].rankChange)) sectorsList[i].rankChange = 0;
       }
 
-      // 6. Refined 6-Stage Rotation State Classifications
+      // 6. Upgraded 6-Stage Rotation State Classifications (Capital Rotation Proxy)
       for (var i = 0; i < sectorsList.length; i++) {
         var s = sectorsList[i];
 
-        // SIX SEPARATE ROTATION STATES
         var stage = "OUTFLOW";
-        if (s.moneyInflowScore > 70.0 && s.volAcc > 1.25 && s.breadthChange > 0) {
+        if (s.moneyInflowScore > 70.0 && s.volAcc > 1.2 && s.breadthChg3D > 0.0) {
           stage = "CONFIRMED INFLOW";
-        } else if (s.score < 55.0 && (s.moneyScoreChange > 15.0 || s.rvolChange > 0.35)) {
+        } else if (s.score < 55.0 && (s.inflowChg3D > 12.0 || s.rvolChg1D > 0.3)) {
           stage = "EARLY INFLOW";
         } else if (s.score >= 58.0 && s.rsVsNifty >= 0.0) {
           stage = "LEADING";
-        } else if (s.score >= 52.0 && (s.ret20 < 0.0 || s.moneyScoreChange < -5.0 || s.rsVsNifty < 0.0)) {
+        } else if (s.score >= 52.0 && (s.ret20 < 0.0 || s.inflowChg3D < -5.0 || s.rsVsNifty < 0.0)) {
           stage = "WEAKENING";
-        } else if (s.score < 52.0 && (s.moneyScoreChange > 3.0 || s.ret5 > 0 || s.rvolChange > 0.1)) {
+        } else if (s.score < 52.0 && (s.inflowChg3D > 3.0 || s.ret5 > 0.0 || s.rvolChg3D > 0.1)) {
           stage = "BOTTOMING";
         } else {
           stage = "OUTFLOW";
@@ -472,7 +508,7 @@ class SectorEngine {
         console.warn("Failed to parse previous sector stages cache: " + cacheErr.message);
       }
 
-      // 8. Generate Alerts & Save stage cache
+      // 8. Generate System Alerts
       var activeAlerts = [];
       var newStageCache = {};
 
@@ -480,26 +516,34 @@ class SectorEngine {
         var s = sectorsList[i];
         newStageCache[s.name] = s.stage;
 
-        var prevStage = previousStages[s.name];
+        var prevStage = previousStages[s.name] || s.prevStage;
         if (prevStage && prevStage !== s.stage) {
-          activeAlerts.push({
-            type: "ROTATION ALERT 🔄",
-            sector: s.name,
-            message: "EOD Sector rotation shifted from [" + prevStage + "] to [" + s.stage + "]!"
-          });
+          if (s.stage === "CONFIRMED INFLOW") {
+            activeAlerts.push({
+              type: "CONFIRMED INFLOW 🔄",
+              sector: s.name,
+              message: "Capital Rotation confirmed into [" + s.name + "]! Breadth is expanding."
+            });
+          } else {
+            activeAlerts.push({
+              type: "ROTATION ALERT 🔄",
+              sector: s.name,
+              message: "Sector rotation shifted from [" + prevStage + "] to [" + s.stage + "]!"
+            });
+          }
         }
 
-        if (s.stage === "EARLY INFLOW") {
+        if (s.stage === "EARLY INFLOW" || (s.score < 55.0 && s.inflowChg3D > 10.0)) {
           activeAlerts.push({
             type: "EARLY INFLOW ⚡",
             sector: s.name,
-            message: "Fresh capital accumulation detected in [" + s.name + "]! Inflow Score change: +" + s.moneyScoreChange.toFixed(0)
+            message: "Early accumulation detected in [" + s.name + "]! Inflow change: +" + s.inflowChg3D.toFixed(0)
           });
         }
       }
 
       // Cache current stages for next execution
-      Cache.put("PREV_SECTOR_STAGES", JSON.stringify(newStageCache), 24 * 60); // 24 hours TTL
+      Cache.put("PREV_SECTOR_STAGES", JSON.stringify(newStageCache), 24 * 60);
 
       // 9. History Storage: Append Sector Scores to history sheet
       var todayStr = PlatformUtils.formatDate(new Date());
@@ -570,7 +614,7 @@ class SectorEngine {
          .setHorizontalAlignment("center")
          .setVerticalAlignment("middle");
 
-    // 1. Performance Monitor Panel (E5:H9)
+    // 1. Performance & System Monitor (E5:H14)
     var monHeader = sheet.getRange("E5:H5");
     monHeader.merge()
              .setValue("⚡ PERFORMANCE & SYSTEM MONITOR")
@@ -650,8 +694,7 @@ class SectorEngine {
     guideBox.merge()
             .setValue("ZERO-MANUAL-WORK PRINCIPLE:\n\n" +
                       "• Open this Dashboard to instantly check where institutional capital is entering NSE.\n" +
-                      "• The platform automatically tracks EOD daily prices, computes RVOL, ranks sectors, and triggers alerts.\n" +
-                      "• Change update delays or trigger periods inside the Settings sheet.\n" +
+                      "• Capital Rotation and New Money Flow indicators automatically track EOD daily prices and rank sectors.\n" +
                       "• Under the hood, the calculation engine runs on pure in-memory matrix computations for rapid speed.")
             .setBackground(colors.INFO_BOX_BG)
             .setFontColor(colors.TEXT_DARK)
@@ -666,7 +709,7 @@ class SectorEngine {
     var leadStartRow = 16;
     var leadHeader = sheet.getRange(leadStartRow, 2, 1, 7);
     leadHeader.merge()
-              .setValue("🏆 PRIORITIZED SECTOR ROTATION LEADERBOARD (RANKED BY INSTITUTIONAL SCORE)")
+              .setValue("🏆 PRIORITIZED SECTOR ROTATION LEADERBOARD (RANKED BY CAPITAL ROTATION PROXY)")
               .setBackground(colors.PRIMARY_DARK)
               .setFontColor(colors.TEXT_LIGHT)
               .setFontWeight("bold")
@@ -675,7 +718,7 @@ class SectorEngine {
               .setHorizontalAlignment("center")
               .setVerticalAlignment("middle");
 
-    var leadColumns = ["Rank (Chg)", "Sector Name", "Rotation Score", "Rotation Stage", "New Money Inflow", "RS vs Nifty (%)", "Breadth (%)"];
+    var leadColumns = ["Rank (Chg)", "Sector Name", "Sector Money Score", "Capital Rotation Proxy", "New Money Inflow Proxy", "RS vs Nifty (%)", "Breadth (%)"];
     var leadColRange = sheet.getRange(leadStartRow + 1, 2, 1, 7);
     leadColRange.setValues([leadColumns])
                 .setBackground(colors.ACCENT)
@@ -700,15 +743,21 @@ class SectorEngine {
         rankChgStr += " (=)";
       }
 
-      // Format Money Inflow with Normalized Score Change
-      var chgSymbol = s.moneyScoreChange >= 0 ? "+" : "";
-      var inflowStr = s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | " + chgSymbol + s.moneyScoreChange.toFixed(0) + ")";
+      // Format Stage Transition
+      var stageStr = s.stage;
+      if (s.prevStage && s.prevStage !== s.stage) {
+        stageStr += " (from " + s.prevStage + ")";
+      }
+
+      // Format Money Inflow with 1D, 3D and 5D changes
+      var getChgSym = function(val) { return val >= 0.0 ? "+" : ""; };
+      var inflowStr = s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | 1D: " + getChgSym(s.inflowChg1D) + s.inflowChg1D.toFixed(0) + " | 3D: " + getChgSym(s.inflowChg3D) + s.inflowChg3D.toFixed(0) + ")";
 
       sectorTableRows.push([
         rankChgStr,
         s.name,
         parseFloat(s.score.toFixed(2)),
-        s.stage,
+        stageStr,
         inflowStr,
         parseFloat(s.rsVsNifty.toFixed(2)) + "%",
         parseFloat(s.breadth.toFixed(1)) + "%"
@@ -734,7 +783,7 @@ class SectorEngine {
 
         // Apply distinct colors to the 6 separate rotation states
         var stageCell = sheet.getRange(rowNum, 5); // Stage column (Col E is index 5 under 1-based columns)
-        var stageText = sectorTableRows[i][3];
+        var stageText = sectorsList[i].stage;
         var sBg = colors.BG_ALT;
 
         if (stageText === "LEADING") sBg = colors.STATE_LEADING;
@@ -759,7 +808,7 @@ class SectorEngine {
     // 3. Top Stocks Opportunities & Active Alert Feed Panels Side-by-Side (B31:H45)
     var nextStartRow = leadStartRow + 3 + sectorTableRows.length;
 
-    // Col B to D: Top Stocks (3 columns: Symbol, Sector, Rotation Score)
+    // Col B to D: Top Stocks
     var tsHeader = sheet.getRange(nextStartRow, 2, 1, 3);
     tsHeader.merge()
             .setValue("🎯 PRIORITY LEADING STOCKS")
@@ -771,7 +820,7 @@ class SectorEngine {
             .setHorizontalAlignment("center")
             .setVerticalAlignment("middle");
 
-    var tsColumns = ["Symbol", "Sector", "Stock Score"];
+    var tsColumns = ["Symbol", "Sector", "Stock Money Score"];
     var tsColRange = sheet.getRange(nextStartRow + 1, 2, 1, 3);
     tsColRange.setValues([tsColumns])
               .setBackground(colors.ACCENT)
@@ -782,7 +831,7 @@ class SectorEngine {
               .setHorizontalAlignment("center")
               .setVerticalAlignment("middle");
 
-    // Gather top 2 stocks from each leading sector
+    // Gather top 2 stocks from each leading/inflow sector
     var topStocksRows = [];
     var limitCount = 0;
     for (var i = 0; i < sectorsList.length; i++) {
@@ -795,7 +844,7 @@ class SectorEngine {
           parseFloat(stock.score.toFixed(2))
         ]);
         limitCount++;
-        if (limitCount >= 8) break; // Display top 8 opportunities
+        if (limitCount >= 8) break;
       }
       if (limitCount >= 8) break;
     }

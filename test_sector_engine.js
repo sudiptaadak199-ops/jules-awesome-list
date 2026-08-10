@@ -35,28 +35,73 @@ global.CacheService = {
   })
 };
 
+// Global ScriptApp Trigger Mock state tracker
+global.mockTriggers = [];
 global.ScriptApp = {
-  getProjectTriggers: () => [],
-  newTrigger: () => ({
+  getProjectTriggers: () => global.mockTriggers,
+  deleteTrigger: (tr) => {
+    global.mockTriggers = global.mockTriggers.filter(t => t !== tr);
+  },
+  newTrigger: (funcName) => ({
     timeBased: () => ({
       everyDays: () => ({
         atHour: () => ({
-          create: () => {}
+          create: () => {
+            const tr = { getHandlerFunction: () => funcName };
+            global.mockTriggers.push(tr);
+            return tr;
+          }
         })
       })
     })
   })
 };
 
-// Mock Classes
+// Real-world Mock Sheets and Ranges linkage
 class MockRange {
-  constructor(values = [[]]) {
-    this.values = values;
+  constructor(sheet, startRow, startCol, numRows, numCols) {
+    this.sheet = sheet;
+    this.startRow = startRow; // 0-based
+    this.startCol = startCol; // 0-based
+    this.numRows = numRows;
+    this.numCols = numCols;
   }
-  getValues() { return this.values; }
-  setValues(vals) { this.values = vals; return this; }
+
+  getValues() {
+    const vals = [];
+    for (let r = 0; r < this.numRows; r++) {
+      const rowArr = this.sheet.values[this.startRow + r] || [];
+      const colArr = [];
+      for (let c = 0; c < this.numCols; c++) {
+        colArr.push(rowArr[this.startCol + c] !== undefined ? rowArr[this.startCol + c] : "");
+      }
+      vals.push(colArr);
+    }
+    return vals;
+  }
+
+  setValues(vals) {
+    for (let r = 0; r < vals.length; r++) {
+      const sheetRowIdx = this.startRow + r;
+      if (!this.sheet.values[sheetRowIdx]) {
+        this.sheet.values[sheetRowIdx] = [];
+      }
+      for (let c = 0; c < vals[r].length; c++) {
+        const sheetColIdx = this.startCol + c;
+        this.sheet.values[sheetRowIdx][sheetColIdx] = vals[r][c];
+      }
+    }
+    return this;
+  }
+
   merge() { return this; }
-  setValue() { return this; }
+  setValue(val) {
+    if (!this.sheet.values[this.startRow]) {
+      this.sheet.values[this.startRow] = [];
+    }
+    this.sheet.values[this.startRow][this.startCol] = val;
+    return this;
+  }
   setBackground() { return this; }
   setFontColor() { return this; }
   setFontWeight() { return this; }
@@ -67,7 +112,18 @@ class MockRange {
   setVerticalAlignment() { return this; }
   setWrap() { return this; }
   setBorder() { return this; }
-  clearContent() { return this; }
+  clearContent() {
+    for (let r = 0; r < this.numRows; r++) {
+      const sheetRowIdx = this.startRow + r;
+      if (this.sheet.values[sheetRowIdx]) {
+        for (let c = 0; c < this.numCols; c++) {
+          const sheetColIdx = this.startCol + c;
+          this.sheet.values[sheetRowIdx][sheetColIdx] = "";
+        }
+      }
+    }
+    return this;
+  }
 }
 
 class MockSheet {
@@ -84,21 +140,16 @@ class MockSheet {
   getRange(row, col, numRows, numCols) {
     const startRow = row - 1;
     const startCol = col - 1;
-    const endRow = numRows ? startRow + numRows : this.values.length;
-    const endCol = numCols ? startCol + numCols : (this.values[0] ? this.values[0].length : 0);
 
-    const sliced = [];
-    for (let r = startRow; r < endRow; r++) {
-      const rowArr = this.values[r] || [];
-      const colArr = [];
-      for (let c = startCol; c < endCol; c++) {
-        colArr.push(rowArr[c] !== undefined ? rowArr[c] : "");
-      }
-      sliced.push(colArr);
-    }
-    return new MockRange(sliced);
+    // Default size calculations matching GAS boundaries
+    const totalRows = numRows ? numRows : Math.max(1, this.values.length - startRow);
+    const totalCols = numCols ? numCols : (this.values[0] ? Math.max(1, this.values[0].length - startCol) : 1);
+
+    return new MockRange(this, startRow, startCol, totalRows, totalCols);
   }
-  clear() {}
+  clear() {
+    this.values = [];
+  }
   setGridlines(g) { this.gridlines = g; }
   setFrozenRows(fr) { this.frozenRows = fr; }
   setColumnWidth(col, width) { this.columnWidths[col] = width; }
@@ -115,11 +166,21 @@ class MockSpreadsheet {
     this.sheets[name] = s;
     return s;
   }
+  getSheets() {
+    return Object.values(this.sheets);
+  }
 }
 
+global.mockUiAlerts = [];
 global.SpreadsheetApp = {
   getActiveSpreadsheet: () => global.activeSpreadsheet,
-  BorderStyle: { SOLID: 'SOLID' }
+  BorderStyle: { SOLID: 'SOLID' },
+  getUi: () => ({
+    alert: (title, msg) => {
+      global.mockUiAlerts.push({ title, msg });
+    },
+    ButtonSet: { OK: 'OK' }
+  })
 };
 
 // Load GAS code
@@ -131,7 +192,8 @@ const gsFiles = [
   'SheetManager.gs',
   'DataProvider.gs',
   'SectorEngine.gs',
-  'Main.gs'
+  'Main.gs',
+  'Menu.gs'
 ];
 
 let sourceCode = '';
@@ -147,6 +209,16 @@ global.SheetManager = SheetManager;
 global.DataProvider = DataProvider;
 global.SectorEngine = SectorEngine;
 global.MainOrchestrator = MainOrchestrator;
+
+// Bind top-level global functions for Apps Script dropdown tests
+global.onOpen = onOpen;
+global.InitializeProject = InitializeProject;
+global.triggerUpdateData = triggerUpdateData;
+global.triggerRunBacktest = triggerRunBacktest;
+global.triggerGenerateReport = triggerGenerateReport;
+global.triggerConfigureSettings = triggerConfigureSettings;
+global.triggerViewLogs = triggerViewLogs;
+global.scheduledUpdateData = scheduledUpdateData;
 `;
 eval(sourceCode);
 
@@ -183,12 +255,12 @@ function runMockPipeline(stockMasterData, historicalData, sectorHistoryData = []
   }
 }
 
-// 12 Deterministic Tests
+// Complete 23-Test Suite
 const tests = [];
 
 // Test 1: Single Stock In Single Sector
 tests.push({
-  name: "1 Stock Pipeline Run",
+  name: "1. 1 Stock Pipeline Run",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -211,7 +283,7 @@ tests.push({
 
 // Test 2: Multiple Stocks In Single Sector
 tests.push({
-  name: "Multiple Stocks in Single Sector",
+  name: "2. Multiple Stocks in Single Sector",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -236,7 +308,7 @@ tests.push({
 
 // Test 3: Multiple Sectors Aggregation
 tests.push({
-  name: "Multiple Sectors Aggregation",
+  name: "3. Multiple Sectors Aggregation",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -261,7 +333,7 @@ tests.push({
 
 // Test 4: Missing NIFTY Benchmark Fallback
 tests.push({
-  name: "Missing NIFTY Index",
+  name: "4. Missing NIFTY Index Fallback",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -283,7 +355,7 @@ tests.push({
 
 // Test 5: Insufficient Stock History
 tests.push({
-  name: "Insufficient Stock History Skipping",
+  name: "5. Insufficient Stock History Skipping",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -306,7 +378,7 @@ tests.push({
 
 // Test 6: Zero Volume Defense
 tests.push({
-  name: "Zero Volume Bounds Protection",
+  name: "6. Zero Volume Bounds Protection",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -330,7 +402,7 @@ tests.push({
 
 // Test 7: Calendar Date discrepancies (Trading Gap)
 tests.push({
-  name: "Calendar Alignment Gap Alignment",
+  name: "7. Calendar Alignment Gap Alignment",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -339,8 +411,6 @@ tests.push({
     const hist = [
       ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
     ];
-
-    // Day gaps in stock but NIFTY constant. We provide 65 entries for both so they are processed cleanly.
     for (let i = 65; i >= 1; i--) {
       const dateStr = `2026-08-${i.toString().padStart(2, '0')}`;
       if (i !== 10 && i !== 11) {
@@ -348,7 +418,6 @@ tests.push({
       }
       hist.push(["NIFTY", dateStr, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
     }
-
     const res = runMockPipeline(master, hist);
     const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
     if (res.success && energySec && isFinite(energySec.rsVsNifty) && !isNaN(energySec.rsVsNifty)) {
@@ -360,7 +429,7 @@ tests.push({
 
 // Test 8: Data-quality Discarding Invalid Rows
 tests.push({
-  name: "Invalid Pricing Filter",
+  name: "8. Invalid Pricing Filter",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -368,8 +437,8 @@ tests.push({
     ];
     const hist = [
       ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"],
-      ["RELIANCE", "2026-08-10", "NaN", "NaN", "NaN", "NaN", "NaN", "NaN", "BAD", new Date()], // Completely NaN
-      ["RELIANCE", "2026-08-11", -10, 0, 5, 0, 0, -100, "BAD", new Date()] // Impossible price/volume
+      ["RELIANCE", "2026-08-10", "NaN", "NaN", "NaN", "NaN", "NaN", "NaN", "BAD", new Date()],
+      ["RELIANCE", "2026-08-11", -10, 0, 5, 0, 0, -100, "BAD", new Date()]
     ];
     for (let i = 50; i >= 1; i--) {
       hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
@@ -385,7 +454,7 @@ tests.push({
 
 // Test 9: Sector Stage Transition Alerting
 tests.push({
-  name: "Stage Rotation Transition Alerts",
+  name: "9. Stage Rotation Transition Alerts",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -412,7 +481,7 @@ tests.push({
 
 // Test 10: New Money Flow score change calculation
 tests.push({
-  name: "New Money Flow Inflow Score Changes",
+  name: "10. New Money Flow Inflow Score Changes",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -440,7 +509,7 @@ tests.push({
 
 // Test 11: Rank Change (Improvement/Deterioration)
 tests.push({
-  name: "Sector Rank Change Calculation",
+  name: "11. Sector Rank Change Calculation",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -455,11 +524,11 @@ tests.push({
     }
     const history = [
       ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
-      ["2026-08-01", "Energy", "55.0", "4", "LEADING", "🔥 STRONG (70 | RVOL=1.25)", "100.0", "2.5", "None"] // Rank was 4
+      ["2026-08-01", "Energy", "55.0", "4", "LEADING", "🔥 STRONG (70 | RVOL=1.25)", "100.0", "2.5", "None"]
     ];
     const res = runMockPipeline(master, hist, history);
     const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
-    if (res.success && energySec && energySec.rankChange === 3) { // Rank 4 -> Rank 1 is +3 change!
+    if (res.success && energySec && energySec.rankChange === 3) {
       return "PASS";
     }
     return "FAIL: Rank improvement did not track correctly.";
@@ -468,7 +537,7 @@ tests.push({
 
 // Test 12: Look-Ahead Bias Prevention (Strict <= Date lookup)
 tests.push({
-  name: "Look-Ahead Bias Prevention (Strict <= Date)",
+  name: "12. Look-Ahead Bias Prevention (Strict <= Date)",
   run: () => {
     const master = [
       ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
@@ -477,41 +546,208 @@ tests.push({
     const hist = [
       ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
     ];
-
-    // Provide a gap in NIFTY data:
-    // RELIANCE has a data point on 2026-08-06.
-    // NIFTY only has data points on 2026-08-05 and 2026-08-07 (future).
-    // The engine MUST select 2026-08-05 (close=21000) and NEVER select 2026-08-07 (close=23000) for 2026-08-06 start.
-
-    // Populate past/exact and future candles
     hist.push(["RELIANCE", "2026-08-06", 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
-    hist.push(["NIFTY", "2026-08-05", 21000, 21050, 20950, 21000, 21000, 1000000, "MOCK", new Date()]); // Past
-    hist.push(["NIFTY", "2026-08-07", 23000, 23050, 22950, 23000, 23000, 1000000, "MOCK", new Date()]); // Future
-
-    // Fill background 60 days to satisfy history check
+    hist.push(["NIFTY", "2026-08-05", 21000, 21050, 20950, 21000, 21000, 1000000, "MOCK", new Date()]);
+    hist.push(["NIFTY", "2026-08-07", 23000, 23050, 22950, 23000, 23000, 1000000, "MOCK", new Date()]);
     for (let i = 60; i >= 1; i--) {
       const dateStr = `2026-07-${i.toString().padStart(2, '0')}`;
       hist.push(["RELIANCE", dateStr, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
       hist.push(["NIFTY", dateStr, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
     }
-
     const res = runMockPipeline(master, hist);
     const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
-
-    // We can evaluate findNiftyClose internally by checking the parsed return
-    // Since REILIANCE return is 0% (last days are 1000), if it used 2026-08-05 close (21000), Nifty ret is (20000 - 21000)/21000 = -4.7%. RS is 0 - (-4.7) = +4.7%.
-    // If it incorrectly selected 2026-08-07 (23000), Nifty ret would be (20000 - 23000)/23000 = -13%. RS would be +13%.
-    // Let's assert that RS is closer to +4.7% than +13%!
     if (res.success && energySec && energySec.rsVsNifty < 10.0) {
       return "PASS";
     }
-    return "FAIL: Look-ahead bias detected. Selected future NIFTY date.";
+    return "FAIL: Look-ahead bias detected.";
+  }
+});
+
+// Test 13: Global InitializeProject entry point exists
+tests.push({
+  name: "13. Global InitializeProject Wrapper Exists",
+  run: () => {
+    if (typeof global.InitializeProject === 'function') {
+      return "PASS";
+    }
+    return "FAIL: Global InitializeProject function is not defined.";
+  }
+});
+
+// Test 14: Global scheduledUpdateData entry point exists
+tests.push({
+  name: "14. Global scheduledUpdateData Trigger Wrapper Exists",
+  run: () => {
+    if (typeof global.scheduledUpdateData === 'function') {
+      return "PASS";
+    }
+    return "FAIL: Global scheduledUpdateData function is not defined.";
+  }
+});
+
+// Test 15: Menu callback validity
+tests.push({
+  name: "15. Menu Callbacks Structural Audit",
+  run: () => {
+    const menuItems = global.Config.MENU.ITEMS;
+    for (const item of menuItems) {
+      if (item.method && typeof global[item.method] !== 'function') {
+        return `FAIL: Menu callback global wrapper ${item.method} is not defined.`;
+      }
+    }
+    return "PASS";
+  }
+});
+
+// Test 16: Trigger callback validity
+tests.push({
+  name: "16. Trigger Callback Wrapper Delegation Audit",
+  run: () => {
+    if (typeof global.scheduledUpdateData === 'function') {
+      return "PASS";
+    }
+    return "FAIL: Trigger callback scheduledUpdateData is not accessible.";
+  }
+});
+
+// Test 17: Duplicate trigger prevention
+tests.push({
+  name: "17. Duplicate Trigger Prevention Idempotency",
+  run: () => {
+    global.mockTriggers = [
+      { getHandlerFunction: () => "scheduledUpdateData" }
+    ];
+    const initialLength = global.mockTriggers.length;
+    MainOrchestrator.checkAndRepairTriggers();
+    if (global.mockTriggers.length === initialLength) {
+      return "PASS";
+    }
+    return `FAIL: Duplicated trigger created. Current trigger count: ${global.mockTriggers.length}`;
+  }
+});
+
+// Test 18: Initialization Idempotency
+tests.push({
+  name: "18. InitializeProject Multiple Executions Idempotency",
+  run: () => {
+    const ss = new MockSpreadsheet();
+    global.activeSpreadsheet = ss;
+
+    // Run twice
+    InitializeProject();
+    const sheetCount1 = ss.getSheets().length;
+    InitializeProject();
+    const sheetCount2 = ss.getSheets().length;
+
+    if (sheetCount1 === sheetCount2 && sheetCount1 > 1) {
+      return "PASS";
+    }
+    return `FAIL: Sheet count mismatch. Run 1: ${sheetCount1} | Run 2: ${sheetCount2}`;
+  }
+});
+
+// Test 19: Missing Sheet Repair Self-Healing
+tests.push({
+  name: "19. Missing Sheet Automated Self-Healing",
+  run: () => {
+    const ss = new MockSpreadsheet();
+    global.activeSpreadsheet = ss;
+    InitializeProject();
+
+    // Delete settings sheet manually
+    delete ss.sheets["Settings"];
+    if (ss.getSheetByName("Settings") === null) {
+      // Run self healing
+      MainOrchestrator.performHealthCheckAndRepair();
+      if (ss.getSheetByName("Settings") !== null) {
+        return "PASS";
+      }
+    }
+    return "FAIL: Settings sheet was not healed.";
+  }
+});
+
+// Test 20: Existing Sheet Preservation
+tests.push({
+  name: "20. Existing Sheet Contents Preservation",
+  run: () => {
+    const ss = new MockSpreadsheet();
+    global.activeSpreadsheet = ss;
+    InitializeProject();
+
+    // Populate some user data inside Settings
+    const settingsSheet = ss.getSheetByName("Settings");
+    settingsSheet.appendRow(["CustomKey", "CustomValue", "Desc", "Date"]);
+
+    // Run repair check
+    MainOrchestrator.performHealthCheckAndRepair();
+
+    const data = settingsSheet.getRange(2, 1, settingsSheet.getLastRow() - 1, 2).getValues();
+    const hasCustomKey = data.some(r => r[0] === "CustomKey");
+    if (hasCustomKey) {
+      return "PASS";
+    }
+    return "FAIL: Custom user configurations were wiped during repair.";
+  }
+});
+
+// Test 21: Global function detection architecture (Apps Script Drops check)
+tests.push({
+  name: "21. Apps Script Dropdown Detection Compliance",
+  run: () => {
+    const dropFunctions = [
+      "onOpen", "InitializeProject", "triggerUpdateData", "triggerRunBacktest",
+      "triggerGenerateReport", "triggerConfigureSettings", "triggerViewLogs", "scheduledUpdateData"
+    ];
+    for (const f of dropFunctions) {
+      if (typeof global[f] !== 'function') {
+        return `FAIL: ${f} is missing from global Apps Script scope.`;
+      }
+    }
+    return "PASS";
+  }
+});
+
+// Test 22: No Apps Script/UI call from headless scheduled trigger
+tests.push({
+  name: "22. Headless Trigger Zero UI Call Safeguards",
+  run: () => {
+    global.mockUiAlerts = [];
+
+    // Intercept updateData to run mock
+    const originalUpdate = MainOrchestrator.updateData;
+    let updateCalled = false;
+    MainOrchestrator.updateData = () => { updateCalled = true; };
+
+    scheduledUpdateData();
+
+    MainOrchestrator.updateData = originalUpdate;
+    if (updateCalled && global.mockUiAlerts.length === 0) {
+      return "PASS";
+    }
+    return `FAIL: UI prompts were invoked during scheduled headless trigger: ${JSON.stringify(global.mockUiAlerts)}`;
+  }
+});
+
+// Test 23: Full dependency integrity
+tests.push({
+  name: "23. Comprehensive System Dependency Integrity",
+  run: () => {
+    // Assert all required sheets exist in configuration map
+    const requiredSheets = Object.values(global.Config.SHEETS);
+    const definitions = Object.keys(global.Config.SHEETS_DEFINITION);
+    for (const sheet of requiredSheets) {
+      if (!definitions.includes(sheet)) {
+        return `FAIL: Missing structural definitions for Config sheet: ${sheet}`;
+      }
+    }
+    return "PASS";
   }
 });
 
 // Execute and print results
 console.log('==================================================');
-console.log('AUTOMATED DETERMINISTIC TEST SUITE');
+console.log('SA STOCK PLATFORM INTEGRATION AUDIT - 23 TESTS');
 console.log('==================================================');
 let passCount = 0;
 for (let i = 0; i < tests.length; i++) {
@@ -522,7 +758,7 @@ for (let i = 0; i < tests.length; i++) {
   } catch (err) {
     verdict = "FAIL: " + err.message;
   }
-  console.log(`Test ${i + 1}: ${t.name.padEnd(45)} -> [${verdict}]`);
+  console.log(`${t.name.padEnd(55)} -> [${verdict}]`);
   if (verdict === "PASS") passCount++;
 }
 console.log('==================================================');

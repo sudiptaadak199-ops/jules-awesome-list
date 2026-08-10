@@ -590,13 +590,29 @@ class SectorEngine {
     sheet.clear();
     sheet.setGridlines(false);
 
+    // Set Column Widths Programmatically for a beautifully spaced trader layout
+    sheet.setColumnWidth(1, 40);   // Spacing Column A
+    sheet.setColumnWidth(2, 90);   // Rank (Chg)
+    sheet.setColumnWidth(3, 140);  // Sector Name
+    sheet.setColumnWidth(4, 150);  // Capital Rotation Proxy (Stage)
+    sheet.setColumnWidth(5, 120);  // Money Score
+    sheet.setColumnWidth(6, 80);   // 1D Change
+    sheet.setColumnWidth(7, 80);   // 3D Change
+    sheet.setColumnWidth(8, 80);   // 5D Change
+    sheet.setColumnWidth(9, 70);   // RVOL
+    sheet.setColumnWidth(10, 80);  // Vol Acc
+    sheet.setColumnWidth(11, 80);  // Breadth (%)
+    sheet.setColumnWidth(12, 100); // RS vs Nifty (%)
+    sheet.setColumnWidth(13, 90);  // 20D Return
+    sheet.setColumnWidth(14, 120); // Top Stock
+
     // Style design tokens
     var theme = Config.THEME;
     var colors = theme.COLORS;
     var fonts = theme.FONTS;
 
     // Title Block
-    sheet.getRange("B2:H2").merge()
+    sheet.getRange("B2:N2").merge()
          .setValue(Config.METADATA.NAME.toUpperCase())
          .setFontSize(fonts.SIZE_TITLE)
          .setFontWeight("bold")
@@ -605,7 +621,7 @@ class SectorEngine {
          .setHorizontalAlignment("center")
          .setVerticalAlignment("middle");
 
-    sheet.getRange("B3:H3").merge()
+    sheet.getRange("B3:N3").merge()
          .setValue("Sector Rotation & Institutional Money Flow Analyzer • Daily End-Of-Day Analytics")
          .setFontSize(fonts.SIZE_SUBTITLE)
          .setFontStyle("italic")
@@ -614,8 +630,8 @@ class SectorEngine {
          .setHorizontalAlignment("center")
          .setVerticalAlignment("middle");
 
-    // 1. Performance & System Monitor (E5:H14)
-    var monHeader = sheet.getRange("E5:H5");
+    // Left Column: System & Ingestion Monitor Card (B5:D15)
+    var monHeader = sheet.getRange("B5:D5");
     monHeader.merge()
              .setValue("⚡ PERFORMANCE & SYSTEM MONITOR")
              .setBackground(colors.PRIMARY_DARK)
@@ -631,25 +647,22 @@ class SectorEngine {
     var statusColor = monitorStats.failedRequests > 0 ? colors.ALERT_ERROR : colors.ALERT_SUCCESS;
 
     var monitorRows = [
-      ["Last Successful Update:", PlatformUtils.formatDate(new Date()) + " " + PlatformUtils.formatTime(new Date())],
-      ["Stocks Processed (Sufficient):", monitorStats.stocksProcessed],
-      ["Stocks Skipped (History < 50D):", monitorStats.stocksSkipped],
-      ["NIFTY Benchmark Status:", monitorStats.benchmarkStatus],
-      ["Active Sectors Processed:", monitorStats.sectorsProcessed],
-      ["Data Rows Updated / Saved:", monitorStats.dataRowsUpdated],
-      ["API Requests / Failures:", monitorStats.apiRequests + " / " + monitorStats.failedRequests],
-      ["Execution Compute Speed:", executionSec + " sec"],
-      ["System Database Status:", statusText]
+      ["Last Update:", PlatformUtils.formatDate(new Date()) + " " + PlatformUtils.formatTime(new Date())],
+      ["Stocks (OK):", monitorStats.stocksProcessed],
+      ["Stocks (Skipped):", monitorStats.stocksSkipped],
+      ["NIFTY Index Status:", monitorStats.benchmarkStatus],
+      ["API Requests / Errors:", monitorStats.apiRequests + " / " + monitorStats.failedRequests],
+      ["Compute Latency:", executionSec + " sec"],
+      ["Database Health Status:", statusText]
     ];
 
-    sheet.getRange("E6:F14").setValues(monitorRows.map(function(r) { return [r[0], ""]; }));
-    sheet.getRange("E6:E14").setFontWeight("bold").setFontFamily(fonts.FAMILY).setFontSize(fonts.SIZE_BODY);
+    sheet.getRange("B6:C12").setValues(monitorRows.map(function(r) { return [r[0], ""]; }));
+    sheet.getRange("B6:B12").setFontWeight("bold").setFontFamily(fonts.FAMILY).setFontSize(fonts.SIZE_BODY);
 
-    // Set actual values next to keys
+    // Write monitor values
     for (var i = 0; i < monitorRows.length; i++) {
-      var cell = sheet.getRange("G" + (6 + i) + ":H" + (6 + i));
-      cell.merge()
-          .setValue(monitorRows[i][1])
+      var cell = sheet.getRange("D" + (6 + i));
+      cell.setValue(monitorRows[i][1])
           .setFontFamily(fonts.FAMILY)
           .setFontSize(fonts.SIZE_BODY)
           .setHorizontalAlignment("left");
@@ -659,57 +672,85 @@ class SectorEngine {
       }
     }
 
-    // Border around Performance Monitor
-    sheet.getRange("E5:H14").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
-
-    // ==========================================
-    // DATA INGESTION MODE HIGHLIGHT CELL (E15:H15)
-    // ==========================================
-    var dataMode = Settings.get("Data Mode", "LIVE").toUpperCase().trim();
-    var modeCell = sheet.getRange("E15:H15");
-    modeCell.merge();
-    if (dataMode === "LIVE") {
-      modeCell.setValue("🟢 LIVE DAILY MARKET DATA (EOD)")
-              .setBackground("#d8f3dc") // light green alert
-              .setFontColor("#1b4332")
-              .setFontWeight("bold")
+    // Mathematical Proxy notice below monitor metrics
+    var noticeCell = sheet.getRange("B13:D15");
+    noticeCell.merge()
+              .setValue("NOTICE: All 'NEW MONEY INFLOW PROXY' and 'CAPITAL ROTATION PROXY' metrics are calculated mathematical indicators tracking momentum, relative strength, and volume acceleration. They do not represent direct institutional order-flow or execution desk data.")
+              .setBackground("#f8f9fa")
+              .setFontColor("#555555")
               .setFontFamily(fonts.FAMILY)
-              .setFontSize(fonts.SIZE_HEADER)
-              .setHorizontalAlignment("center")
-              .setVerticalAlignment("middle");
+              .setFontSize(7)
+              .setVerticalAlignment("middle")
+              .setWrap(true);
+
+    // Border around Left Card Panel
+    sheet.getRange("B5:D15").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
+
+
+    // Right Column Side-by-Side: Real-time System Alerts & Ingestion Status (E5:N15)
+    var alertHeader = sheet.getRange("E5:N5");
+    alertHeader.merge()
+               .setValue("🚨 REAL-TIME SYSTEM ALERTS (MONEY FLOW & CAPITAL ROTATION)")
+               .setBackground("#780000") // Warning Dark Red
+               .setFontColor(colors.TEXT_LIGHT)
+               .setFontWeight("bold")
+               .setFontFamily(fonts.FAMILY)
+               .setFontSize(fonts.SIZE_HEADER)
+               .setHorizontalAlignment("center")
+               .setVerticalAlignment("middle");
+
+    var alertRows = [];
+    var nowTimeStr = PlatformUtils.formatTime(new Date());
+
+    if (activeAlerts.length > 0) {
+      for (var i = 0; i < Math.min(8, activeAlerts.length); i++) {
+        var a = activeAlerts[i];
+        alertRows.push([
+          a.type,
+          a.sector,
+          a.message,
+          nowTimeStr,
+          "", "", "", "", "", "" // Merge padding columns
+        ]);
+      }
     } else {
-      modeCell.setValue("⚠️ INGESTION MODE: DEMO/MOCK SIMULATION DATA")
-              .setBackground("#f8d7da") // soft red alert
-              .setFontColor("#721c24")
-              .setFontWeight("bold")
-              .setFontFamily(fonts.FAMILY)
-              .setFontSize(fonts.SIZE_HEADER)
-              .setHorizontalAlignment("center")
-              .setVerticalAlignment("middle");
+      alertRows.push(["HEALTHY 🟢", "System", "No sector-rotation shifts or high-volume anomalies found. Capital is steady.", nowTimeStr, "", "", "", "", "", ""]);
     }
-    modeCell.setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
-    // Quick platform guidelines Box (B5:C14)
-    var guideBox = sheet.getRange("B5:C14");
-    guideBox.merge()
-            .setValue("ZERO-MANUAL-WORK PRINCIPLE:\n\n" +
-                      "• Open this Dashboard to instantly check where institutional capital is entering NSE.\n" +
-                      "• Capital Rotation and New Money Flow indicators automatically track EOD daily prices and rank sectors.\n" +
-                      "• Under the hood, the calculation engine runs on pure in-memory matrix computations for rapid speed.")
-            .setBackground(colors.INFO_BOX_BG)
-            .setFontColor(colors.TEXT_DARK)
-            .setFontFamily(fonts.FAMILY)
-            .setFontSize(fonts.SIZE_BODY)
-            .setVerticalAlignment("top")
-            .setWrap(true);
-    guideBox.setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
+    // Fill details inside the alerts block
+    for (var i = 0; i < Math.min(8, alertRows.length); i++) {
+      var rNum = 6 + i;
+      sheet.getRange("E" + rNum + ":F" + rNum).merge().setValue(alertRows[i][0]).setFontWeight("bold").setHorizontalAlignment("center");
+      sheet.getRange("G" + rNum + ":H" + rNum).merge().setValue(alertRows[i][1]).setHorizontalAlignment("center");
+      sheet.getRange("I" + rNum + ":M" + rNum).merge().setValue(alertRows[i][2]).setWrap(true);
+      sheet.getRange("N" + rNum).setValue(alertRows[i][3]).setHorizontalAlignment("center");
+
+      var styleRowRange = sheet.getRange("E" + rNum + ":N" + rNum);
+      styleRowRange.setFontFamily(fonts.FAMILY).setFontSize(fonts.SIZE_BODY);
+
+      if (alertRows[i][0].indexOf("MONEY") !== -1 || alertRows[i][0].indexOf("EARLY") !== -1) {
+        styleRowRange.setBackground("#fff3b0");
+      } else if (alertRows[i][0].indexOf("CONFIRMED") !== -1 || alertRows[i][0].indexOf("ROTATION") !== -1) {
+        styleRowRange.setBackground("#e2eafc");
+      } else if (i % 2 === 1) {
+        styleRowRange.setBackground(colors.BG_ALT);
+      }
+    }
+
+    // Blank out unused lines in alert cards
+    for (var i = alertRows.length; i < 9; i++) {
+      var rNum = 6 + i;
+      sheet.getRange("E" + rNum + ":N" + rNum).merge().setValue("");
+    }
+
+    sheet.getRange("E5:N15").setBorder(true, true, true, true, false, false, colors.ACCENT, SpreadsheetApp.BorderStyle.SOLID);
 
 
-    // 2. Prioritized Sector Leaderboard (B16:H27)
-    var leadStartRow = 16;
-    var leadHeader = sheet.getRange(leadStartRow, 2, 1, 7);
+    // 2. Prioritized Sector Leaderboard (B17:N29)
+    var leadStartRow = 17;
+    var leadHeader = sheet.getRange(leadStartRow, 2, 1, 13);
     leadHeader.merge()
-              .setValue("🏆 PRIORITIZED SECTOR ROTATION LEADERBOARD (RANKED BY CAPITAL ROTATION PROXY)")
+              .setValue("🏆 PRIORITIZED SECTOR ROTATION LEADERBOARD (RANKED BY SECTOR MONEY SCORE)")
               .setBackground(colors.PRIMARY_DARK)
               .setFontColor(colors.TEXT_LIGHT)
               .setFontWeight("bold")
@@ -718,8 +759,8 @@ class SectorEngine {
               .setHorizontalAlignment("center")
               .setVerticalAlignment("middle");
 
-    var leadColumns = ["Rank (Chg)", "Sector Name", "Sector Money Score", "Capital Rotation Proxy", "New Money Inflow Proxy", "RS vs Nifty (%)", "Breadth (%)"];
-    var leadColRange = sheet.getRange(leadStartRow + 1, 2, 1, 7);
+    var leadColumns = ["Rank (Chg)", "Sector Name", "Money Score", "Capital Rotation Proxy", "NEW MONEY INFLOW PROXY", "RVOL", "Vol Acc", "Breadth (%)", "RS vs NIFTY", "20D Return", "Top Stock", "Score 1D Δ", "Score 3D Δ"];
+    var leadColRange = sheet.getRange(leadStartRow + 1, 2, 1, 13);
     leadColRange.setValues([leadColumns])
                 .setBackground(colors.ACCENT)
                 .setFontColor(colors.TEXT_LIGHT)
@@ -733,7 +774,6 @@ class SectorEngine {
     for (var i = 0; i < sectorsList.length; i++) {
       var s = sectorsList[i];
 
-      // Format Rank Change e.g. "2 (+1)" or "4 (-2)" or "3 (=)"
       var rankChgStr = s.rank;
       if (s.rankChange > 0) {
         rankChgStr += " (▲" + s.rankChange + ")";
@@ -743,46 +783,46 @@ class SectorEngine {
         rankChgStr += " (=)";
       }
 
-      // Format Stage Transition
-      var stageStr = s.stage;
-      if (s.prevStage && s.prevStage !== s.stage) {
-        stageStr += " (from " + s.prevStage + ")";
-      }
-
-      // Format Money Inflow with 1D, 3D and 5D changes
       var getChgSym = function(val) { return val >= 0.0 ? "+" : ""; };
-      var inflowStr = s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | 1D: " + getChgSym(s.inflowChg1D) + s.inflowChg1D.toFixed(0) + " | 3D: " + getChgSym(s.inflowChg3D) + s.inflowChg3D.toFixed(0) + ")";
+      var inflowDetails = s.moneyInflow + " (" + s.moneyInflowScore.toFixed(0) + " | 1D: " + getChgSym(s.inflowChg1D) + s.inflowChg1D.toFixed(0) + " | 3D: " + getChgSym(s.inflowChg3D) + s.inflowChg3D.toFixed(0) + ")";
+
+      var topStockSymbol = s.stocks[0] ? s.stocks[0].symbol : "None";
 
       sectorTableRows.push([
         rankChgStr,
         s.name,
         parseFloat(s.score.toFixed(2)),
-        stageStr,
-        inflowStr,
+        s.stage,
+        inflowDetails,
+        parseFloat(s.rvol.toFixed(2)),
+        parseFloat(s.volAcc.toFixed(2)),
+        parseFloat(s.breadth.toFixed(1)) + "%",
         parseFloat(s.rsVsNifty.toFixed(2)) + "%",
-        parseFloat(s.breadth.toFixed(1)) + "%"
+        parseFloat(s.ret20.toFixed(2)) + "%",
+        topStockSymbol,
+        parseFloat(s.inflowChg1D.toFixed(2)),
+        parseFloat(s.inflowChg3D.toFixed(2))
       ]);
     }
 
     if (sectorTableRows.length > 0) {
-      var leadBodyRange = sheet.getRange(leadStartRow + 2, 2, sectorTableRows.length, 7);
+      var leadBodyRange = sheet.getRange(leadStartRow + 2, 2, sectorTableRows.length, 13);
       leadBodyRange.setValues(sectorTableRows)
                    .setFontFamily(fonts.FAMILY)
                    .setFontSize(fonts.SIZE_BODY)
                    .setVerticalAlignment("middle");
 
-      // Zebra-striping and stage background highlights
+      // Highlights and stripes
       for (var i = 0; i < sectorTableRows.length; i++) {
         var rowNum = leadStartRow + 2 + i;
-        var rRange = sheet.getRange(rowNum, 2, 1, 7);
+        var rRange = sheet.getRange(rowNum, 2, 1, 13);
 
-        // Standard alternate rows color
         if (i % 2 === 1) {
           rRange.setBackground(colors.BG_ALT);
         }
 
-        // Apply distinct colors to the 6 separate rotation states
-        var stageCell = sheet.getRange(rowNum, 5); // Stage column (Col E is index 5 under 1-based columns)
+        // Color rotation state cell
+        var stageCell = sheet.getRange(rowNum, 5); // Column 5 is Column E (Capital Rotation Stage)
         var stageText = sectorsList[i].stage;
         var sBg = colors.BG_ALT;
 
@@ -795,23 +835,23 @@ class SectorEngine {
 
         stageCell.setBackground(sBg).setFontWeight("bold");
 
-        // Highlight first Rank
+        // First rank gets highlight
         if (i === 0) {
           sheet.getRange(rowNum, 2, 1, 3).setBackground(colors.GOLD_GOLD);
         }
       }
 
-      sheet.getRange(leadStartRow + 2, 2, sectorTableRows.length, 7).setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
+      leadBodyRange.setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
     }
 
 
-    // 3. Top Stocks Opportunities & Active Alert Feed Panels Side-by-Side (B31:H45)
-    var nextStartRow = leadStartRow + 3 + sectorTableRows.length;
+    // 3. Category Group Watchlists & Alerts side-by-side (Row 32 onwards)
+    var catStartRow = leadStartRow + 3 + sectorTableRows.length;
 
-    // Col B to D: Top Stocks
-    var tsHeader = sheet.getRange(nextStartRow, 2, 1, 3);
-    tsHeader.merge()
-            .setValue("🎯 PRIORITY LEADING STOCKS")
+    // Col B to H: Category Watchlists
+    var cwHeader = sheet.getRange(catStartRow, 2, 1, 6);
+    cwHeader.merge()
+            .setValue("📋 CAPITAL ROTATION WATCHLISTS & SIGNAL CLASSIFICATIONS")
             .setBackground(colors.PRIMARY_DARK)
             .setFontColor(colors.TEXT_LIGHT)
             .setFontWeight("bold")
@@ -820,9 +860,9 @@ class SectorEngine {
             .setHorizontalAlignment("center")
             .setVerticalAlignment("middle");
 
-    var tsColumns = ["Symbol", "Sector", "Stock Money Score"];
-    var tsColRange = sheet.getRange(nextStartRow + 1, 2, 1, 3);
-    tsColRange.setValues([tsColumns])
+    var cwColumns = ["Stage Category", "Sectors Grouped", "Money Score", "Avg Breadth", "1D Δ Inflow", "Top Stock In Sector"];
+    var cwColRange = sheet.getRange(catStartRow + 1, 2, 1, 6);
+    cwColRange.setValues([cwColumns])
               .setBackground(colors.ACCENT)
               .setFontColor(colors.TEXT_LIGHT)
               .setFontWeight("bold")
@@ -831,105 +871,152 @@ class SectorEngine {
               .setHorizontalAlignment("center")
               .setVerticalAlignment("middle");
 
-    // Gather top 2 stocks from each leading/inflow sector
-    var topStocksRows = [];
-    var limitCount = 0;
+    // Group sectors by category
+    var stagesToWatch = ["LEADING", "CONFIRMED INFLOW", "EARLY INFLOW", "BOTTOMING", "WEAKENING", "OUTFLOW"];
+    var watchRows = [];
+
+    for (var k = 0; k < stagesToWatch.length; k++) {
+      var stageKey = stagesToWatch[k];
+      var matchingSectors = sectorsList.filter(function(s) { return s.stage === stageKey; });
+
+      if (matchingSectors.length > 0) {
+        for (var m = 0; m < matchingSectors.length; m++) {
+          var s = matchingSectors[m];
+          var topStockSymbol = s.stocks[0] ? s.stocks[0].symbol : "None";
+          watchRows.push([
+            m === 0 ? stageKey : "", // Only show label on the first grouped row
+            s.name,
+            parseFloat(s.score.toFixed(2)),
+            parseFloat(s.breadth.toFixed(1)) + "%",
+            parseFloat(s.inflowChg1D.toFixed(1)),
+            topStockSymbol
+          ]);
+        }
+      } else {
+        watchRows.push([
+          stageKey,
+          "No active sectors.",
+          0.00,
+          "0.0%",
+          0.00,
+          "N/A"
+        ]);
+      }
+    }
+
+    var cwBodyRange = sheet.getRange(catStartRow + 2, 2, watchRows.length, 6);
+    cwBodyRange.setValues(watchRows)
+               .setFontFamily(fonts.FAMILY)
+               .setFontSize(fonts.SIZE_BODY)
+               .setVerticalAlignment("middle");
+
+    // Apply watch list stage styles
+    var currentGroupStyle = "";
+    var currentGroupColor = colors.BG_ALT;
+    for (var i = 0; i < watchRows.length; i++) {
+      var rNum = catStartRow + 2 + i;
+      var stageText = watchRows[i][0];
+
+      if (stageText) {
+        currentGroupStyle = stageText;
+        if (stageText === "LEADING") currentGroupColor = colors.STATE_LEADING;
+        else if (stageText === "CONFIRMED INFLOW") currentGroupColor = colors.STATE_CONFIRMED_INFLOW;
+        else if (stageText === "EARLY INFLOW") currentGroupColor = colors.STATE_EARLY_INFLOW;
+        else if (stageText === "BOTTOMING") currentGroupColor = colors.STATE_BOTTOMING;
+        else if (stageText === "WEAKENING") currentGroupColor = colors.STATE_WEAKENING;
+        else currentGroupColor = colors.STATE_OUTFLOW;
+      }
+
+      sheet.getRange(rNum, 2).setBackground(currentGroupColor).setFontWeight("bold");
+
+      if (i % 2 === 1) {
+        sheet.getRange(rNum, 3, 1, 5).setBackground(colors.BG_ALT);
+      }
+    }
+    cwBodyRange.setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
+
+
+    // Col I to N: Priority Leading Stocks opportunities
+    var sHeader = sheet.getRange(catStartRow, 8, 1, 7);
+    sHeader.merge()
+           .setValue("🎯 PRIORITY OPPORTUNITY LEADING STOCKS")
+           .setBackground(colors.PRIMARY_DARK)
+           .setFontColor(colors.TEXT_LIGHT)
+           .setFontWeight("bold")
+           .setFontFamily(fonts.FAMILY)
+           .setFontSize(fonts.SIZE_HEADER)
+           .setHorizontalAlignment("center")
+           .setVerticalAlignment("middle");
+
+    var sColumns = ["Symbol", "Sector Name", "Stock Score", "RVOL", "RS vs Nifty (%)", "20D Return", "Close Price"];
+    var sColRange = sheet.getRange(catStartRow + 1, 8, 1, 7);
+    sColRange.setValues([sColumns])
+             .setBackground(colors.ACCENT)
+             .setFontColor(colors.TEXT_LIGHT)
+             .setFontWeight("bold")
+             .setFontFamily(fonts.FAMILY)
+             .setFontSize(fonts.SIZE_HEADER)
+             .setHorizontalAlignment("center")
+             .setVerticalAlignment("middle");
+
+    // Gather top opportunities
+    var stockRows = [];
+    var counter = 0;
     for (var i = 0; i < sectorsList.length; i++) {
       var s = sectorsList[i];
       for (var j = 0; j < Math.min(2, s.stocks.length); j++) {
         var stock = s.stocks[j];
-        topStocksRows.push([
+        stockRows.push([
           stock.symbol,
           s.name,
-          parseFloat(stock.score.toFixed(2))
+          parseFloat(stock.score.toFixed(2)),
+          parseFloat(stock.rvol.toFixed(2)),
+          parseFloat(stock.rsVsNifty.toFixed(2)) + "%",
+          parseFloat(stock.ret20.toFixed(2)) + "%",
+          parseFloat(stock.price.toFixed(2))
         ]);
-        limitCount++;
-        if (limitCount >= 8) break;
+        counter++;
+        if (counter >= watchRows.length) break; // Keep side-by-side tables perfectly aligned
       }
-      if (limitCount >= 8) break;
+      if (counter >= watchRows.length) break;
     }
 
-    if (topStocksRows.length > 0) {
-      var tsBodyRange = sheet.getRange(nextStartRow + 2, 2, topStocksRows.length, 3);
-      tsBodyRange.setValues(topStocksRows)
-                 .setFontFamily(fonts.FAMILY)
-                 .setFontSize(fonts.SIZE_BODY)
-                 .setVerticalAlignment("middle");
-
-      for (var i = 0; i < topStocksRows.length; i++) {
-        if (i % 2 === 1) {
-          sheet.getRange(nextStartRow + 2 + i, 2, 1, 3).setBackground(colors.BG_ALT);
-        }
-      }
-      tsBodyRange.setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
+    // Padding empty lines if stocks count is smaller
+    for (var i = stockRows.length; i < watchRows.length; i++) {
+      stockRows.push(["N/A", "No Sector Data", 0.00, 1.00, "0.0%", "0.0%", 0.00]);
     }
 
+    var sBodyRange = sheet.getRange(catStartRow + 2, 8, stockRows.length, 7);
+    sBodyRange.setValues(stockRows)
+              .setFontFamily(fonts.FAMILY)
+              .setFontSize(fonts.SIZE_BODY)
+              .setVerticalAlignment("middle");
 
-    // Col E to H: Active Alert Feed (4 columns: Alert Type, Sector, Alert Message)
-    var alertHeader = sheet.getRange(nextStartRow, 5, 1, 4);
-    alertHeader.merge()
-               .setValue("🚨 REAL-TIME SYSTEM ALERTS (MONEY FLOW & STAGE SHIFTS)")
-               .setBackground("#780000") // Warning Dark Red
-               .setFontColor(colors.TEXT_LIGHT)
-               .setFontWeight("bold")
-               .setFontFamily(fonts.FAMILY)
-               .setFontSize(fonts.SIZE_HEADER)
-               .setHorizontalAlignment("center")
-               .setVerticalAlignment("middle");
-
-    var alertColumns = ["Alert Class", "Target", "Detail Notification", "Time"];
-    var alertColRange = sheet.getRange(nextStartRow + 1, 5, 1, 4);
-    alertColRange.setValues([alertColumns])
-                 .setBackground(colors.ACCENT)
-                 .setFontColor(colors.TEXT_LIGHT)
-                 .setFontWeight("bold")
-                 .setFontFamily(fonts.FAMILY)
-                 .setFontSize(fonts.SIZE_HEADER)
-                 .setHorizontalAlignment("center")
-                 .setVerticalAlignment("middle");
-
-    var alertRows = [];
-    var nowTimeStr = PlatformUtils.formatTime(new Date());
-
-    if (activeAlerts.length > 0) {
-      for (var i = 0; i < Math.min(8, activeAlerts.length); i++) {
-        var a = activeAlerts[i];
-        alertRows.push([
-          a.type,
-          a.sector,
-          a.message,
-          nowTimeStr
-        ]);
-      }
-    } else {
-      alertRows.push(["HEALTHY 🟢", "System", "No sector-rotation shifts or high-volume anomalies found. Capital is steady.", nowTimeStr]);
-    }
-
-    var alertBodyRange = sheet.getRange(nextStartRow + 2, 5, alertRows.length, 4);
-    alertBodyRange.setValues(alertRows)
-                  .setFontFamily(fonts.FAMILY)
-                  .setFontSize(fonts.SIZE_BODY)
-                  .setVerticalAlignment("middle");
-
-    for (var i = 0; i < alertRows.length; i++) {
-      var rowNum = nextStartRow + 2 + i;
-      if (alertRows[i][0].indexOf("MONEY") !== -1 || alertRows[i][0].indexOf("EARLY") !== -1) {
-        sheet.getRange(rowNum, 5, 1, 4).setBackground("#fff3b0"); // Highlight golden warning
-      } else if (alertRows[i][0].indexOf("ROTATION") !== -1) {
-        sheet.getRange(rowNum, 5, 1, 4).setBackground("#e2eafc"); // Soft Blue highlight
-      } else if (i % 2 === 1) {
-        sheet.getRange(rowNum, 5, 1, 4).setBackground(colors.BG_ALT);
+    for (var i = 0; i < stockRows.length; i++) {
+      if (i % 2 === 1) {
+        sheet.getRange(catStartRow + 2 + i, 8, 1, 7).setBackground(colors.BG_ALT);
       }
     }
-    alertBodyRange.setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
+    sBodyRange.setBorder(true, true, true, true, true, true, "#e0e0e0", SpreadsheetApp.BorderStyle.SOLID);
 
-    // Apply auto-row heights to headers to make it clean
+
+    // Formatting Row Heights
     sheet.setRowHeight(2, 35);
     sheet.setRowHeight(3, 20);
     sheet.setRowHeight(5, 26);
     sheet.setRowHeight(leadStartRow, 28);
     sheet.setRowHeight(leadStartRow + 1, 24);
-    sheet.setRowHeight(nextStartRow, 28);
-    sheet.setRowHeight(nextStartRow + 1, 24);
+    sheet.setRowHeight(catStartRow, 28);
+    sheet.setRowHeight(catStartRow + 1, 24);
+
+    for (var r = 6; r <= 14; r++) {
+      sheet.setRowHeight(r, 22);
+    }
+    for (var r = leadStartRow + 2; r < leadStartRow + 2 + sectorTableRows.length; r++) {
+      sheet.setRowHeight(r, 22);
+    }
+    for (var r = catStartRow + 2; r < catStartRow + 2 + watchRows.length; r++) {
+      sheet.setRowHeight(r, 22);
+    }
   }
 }

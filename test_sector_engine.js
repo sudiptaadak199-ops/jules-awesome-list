@@ -35,6 +35,13 @@ global.CacheService = {
   })
 };
 
+global.LockService = {
+  getScriptLock: () => ({
+    tryLock: (timeout) => true,
+    releaseLock: () => {}
+  })
+};
+
 // Global ScriptApp Trigger Mock state tracker
 global.mockTriggers = [];
 global.ScriptApp = {

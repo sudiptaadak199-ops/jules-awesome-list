@@ -119,11 +119,32 @@ function triggerViewLogs() {
 /**
  * Daily scheduled time-driven trigger callback.
  * Runs on headless execution context with zero UI prompts.
+ * Acquires a Google Apps Script LockService lock to prevent concurrent scheduled executions.
  */
 function scheduledUpdateData() {
+  var lock = LockService.getScriptLock();
+  var hasLock = false;
+  try {
+    // Attempt to acquire script lock for 10 seconds
+    hasLock = lock.tryLock(10000);
+  } catch (lockErr) {
+    console.warn("LockService error: " + lockErr.message);
+  }
+
+  if (!hasLock) {
+    console.warn("Could not acquire script lock. Parallel execution bypassed to prevent database corruption.");
+    return;
+  }
+
   try {
     MainOrchestrator.updateData();
   } catch (e) {
     console.error("Scheduled Update Data failed: " + e.message);
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (releaseErr) {
+      console.warn("Failed to release lock: " + releaseErr.message);
+    }
   }
 }

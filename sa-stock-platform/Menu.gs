@@ -115,3 +115,15 @@ function triggerViewLogs() {
     SpreadsheetApp.getUi().alert("System Error", "Logs sheet is missing. Please run Initialize Project to restore.", SpreadsheetApp.getUi().ButtonSet.OK);
   }
 }
+
+/**
+ * Daily scheduled time-driven trigger callback.
+ * Runs on headless execution context with zero UI prompts.
+ */
+function scheduledUpdateData() {
+  try {
+    MainOrchestrator.updateData();
+  } catch (e) {
+    console.error("Scheduled Update Data failed: " + e.message);
+  }
+}

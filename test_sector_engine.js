@@ -1,3 +1,17 @@
+/****************************************************************************************
+ * ⚠️ WARNING: DO NOT COPY OR PASTE THIS FILE INTO THE GOOGLE APPS SCRIPT EDITOR! ⚠️
+ *
+ * This is a local Node.js test runner used solely for unit testing and diagnostic
+ * simulations in the sandbox workspace.
+ *
+ * If you paste this .js file (which contains Node.js modules like 'fs' and require)
+ * into your Google Sheets Apps Script project, Google Apps Script will fail to parse
+ * the code, disable all function execution, and report "No functions" in the dropdown!
+ *
+ * Only copy the files located inside the "sa-stock-platform/" folder (Config.gs,
+ * Menu.gs, Main.gs, DataProvider.gs, SectorEngine.gs, etc.) into Apps Script.
+ ****************************************************************************************/
+
 const fs = require('fs');
 
 // Mock Google Apps Script Global Context

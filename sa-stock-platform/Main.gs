@@ -171,14 +171,21 @@ class MainOrchestrator {
       var triggers = ScriptApp.getProjectTriggers();
       var triggerExists = false;
       for (var i = 0; i < triggers.length; i++) {
-        if (triggers[i].getHandlerFunction() === "triggerUpdateData") {
+        var funcName = triggers[i].getHandlerFunction();
+        if (funcName === "scheduledUpdateData") {
           triggerExists = true;
-          break;
+        } else if (funcName === "triggerUpdateData") {
+          // Safely delete the old incorrect/crashing trigger to complete self-healing
+          try {
+            ScriptApp.deleteTrigger(triggers[i]);
+          } catch (deleteErr) {
+            console.warn("Could not delete old trigger: " + deleteErr.message);
+          }
         }
       }
       if (!triggerExists) {
-        // Create daily time-driven trigger for updateData (scheduled for 4 PM standard NSE market close)
-        ScriptApp.newTrigger("triggerUpdateData")
+        // Create daily time-driven trigger for scheduledUpdateData (scheduled for 4 PM standard NSE market close)
+        ScriptApp.newTrigger("scheduledUpdateData")
                  .timeBased()
                  .everyDays(1)
                  .atHour(16)

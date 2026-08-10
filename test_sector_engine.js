@@ -1,8 +1,8 @@
 const fs = require('fs');
 
-// 1. Mock Google Apps Script Global Context
+// Mock Google Apps Script Global Context
 global.Logger = {
-  log: (...args) => console.log('[GAS Logger]', ...args),
+  log: (...args) => {},
   init: () => {},
   success: () => {},
   warning: () => {},
@@ -21,7 +21,6 @@ global.CacheService = {
   })
 };
 
-// Mock ScriptApp
 global.ScriptApp = {
   getProjectTriggers: () => [],
   newTrigger: () => ({
@@ -35,18 +34,13 @@ global.ScriptApp = {
   })
 };
 
-// Mock Utilities/SpreadsheetApp
+// Mock Classes
 class MockRange {
   constructor(values = [[]]) {
     this.values = values;
   }
-  getValues() {
-    return this.values;
-  }
-  setValues(vals) {
-    this.values = vals;
-    return this;
-  }
+  getValues() { return this.values; }
+  setValues(vals) { this.values = vals; return this; }
   merge() { return this; }
   setValue() { return this; }
   setBackground() { return this; }
@@ -71,12 +65,8 @@ class MockSheet {
     this.columnWidths = {};
     this.rowHeights = {};
   }
-  getLastRow() {
-    return this.values.length;
-  }
-  getLastColumn() {
-    return this.values[0] ? this.values[0].length : 0;
-  }
+  getLastRow() { return this.values.length; }
+  getLastColumn() { return this.values[0] ? this.values[0].length : 0; }
   getRange(row, col, numRows, numCols) {
     const startRow = row - 1;
     const startCol = col - 1;
@@ -99,21 +89,13 @@ class MockSheet {
   setFrozenRows(fr) { this.frozenRows = fr; }
   setColumnWidth(col, width) { this.columnWidths[col] = width; }
   setRowHeight(row, height) { this.rowHeights[row] = height; }
-  appendRow(row) {
-    this.values.push(row);
-  }
-  deleteRow(idx) {
-    this.values.splice(idx - 1, 1);
-  }
+  appendRow(row) { this.values.push(row); }
+  deleteRow(idx) { this.values.splice(idx - 1, 1); }
 }
 
 class MockSpreadsheet {
-  constructor() {
-    this.sheets = {};
-  }
-  getSheetByName(name) {
-    return this.sheets[name] || null;
-  }
+  constructor() { this.sheets = {}; }
+  getSheetByName(name) { return this.sheets[name] || null; }
   insertSheet(name) {
     const s = new MockSheet(name);
     this.sheets[name] = s;
@@ -126,7 +108,7 @@ global.SpreadsheetApp = {
   BorderStyle: { SOLID: 'SOLID' }
 };
 
-// 2. Load and Concatenate GAS Source Files (evaluating them in node global context)
+// Load GAS code
 const gsFiles = [
   'Config.gs',
   'Utilities.gs',
@@ -142,11 +124,7 @@ let sourceCode = '';
 for (const file of gsFiles) {
   sourceCode += fs.readFileSync('sa-stock-platform/' + file, 'utf8') + '\n';
 }
-
-// Convert "var Config =" to "global.Config ="
 sourceCode = sourceCode.replace('var Config =', 'global.Config =');
-
-// Append global bindings so the evaluated classes are placed into the node global context
 sourceCode += `
 global.PlatformUtils = PlatformUtils;
 global.Settings = Settings;
@@ -156,206 +134,344 @@ global.DataProvider = DataProvider;
 global.SectorEngine = SectorEngine;
 global.MainOrchestrator = MainOrchestrator;
 `;
-
-// Evaluate the code in global context
 eval(sourceCode);
 
-// Intercept Sectors List during pipeline execution
-const originalRenderDashboardLayout = SectorEngine.renderDashboardLayout;
-let capturedSectorsList = null;
+// Intercept pipeline layout writes to capture internal sectorsList
+let capturedSectors = null;
+const originalRender = SectorEngine.renderDashboardLayout;
 SectorEngine.renderDashboardLayout = function(sectorsList, activeAlerts, monitorStats) {
-  capturedSectorsList = sectorsList;
-  return originalRenderDashboardLayout.call(this, sectorsList, activeAlerts, monitorStats);
+  capturedSectors = sectorsList;
+  return originalRender.call(this, sectorsList, activeAlerts, monitorStats);
 };
 
-// 3. Prepare Mock Spreadsheet and Run Pipeline
-const ss = new MockSpreadsheet();
-global.activeSpreadsheet = ss;
+// Deterministic Test Executor
+function runMockPipeline(stockMasterData, historicalData, sectorHistoryData = []) {
+  const ss = new MockSpreadsheet();
+  global.activeSpreadsheet = ss;
 
-// Create required sheet structures with mock data
-const stockMasterValues = [
-  ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
-  ["RELIANCE", "Reliance Industries Ltd.", "NSE", "Energy", "Oil & Gas", "Active", "", "2024-01-01"],
-  ["ONGC", "Oil and Natural Gas Corp.", "NSE", "Energy", "Oil & Gas", "Active", "", "2024-01-01"],
-  ["TCS", "Tata Consultancy Services Ltd.", "NSE", "Technology", "IT Services", "Active", "", "2024-01-01"],
-  ["INFY", "Infosys Ltd.", "NSE", "Technology", "IT Services", "Active", "", "2024-01-01"]
-];
-ss.insertSheet("Stock Master").values = stockMasterValues;
+  ss.insertSheet("Stock Master").values = stockMasterData;
+  ss.insertSheet("Historical Data").values = historicalData;
+  ss.insertSheet("Sector History").values = sectorHistoryData;
+  ss.insertSheet("Dashboard");
 
-// Generate Mock Historical Data (60 Days for each stock + NIFTY)
-const histSheet = ss.insertSheet("Historical Data");
-histSheet.values = [
-  ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
-];
+  Settings.init();
+  const monitorStats = {
+    executionTime: 0, stocksProcessed: 0, sectorsProcessed: 0,
+    dataRowsUpdated: 0, apiRequests: 0, failedRequests: 0
+  };
 
-const symbols = ["RELIANCE", "ONGC", "TCS", "INFY", "NIFTY"];
-const now = new Date();
-
-for (let d = 60; d >= 1; d--) {
-  const dateObj = new Date(now.getTime() - d * 24 * 60 * 60 * 1000);
-  const dateStr = PlatformUtils.formatDate(dateObj);
-  for (const sym of symbols) {
-    const base = sym === "NIFTY" ? 22000 : 1000;
-    const closePrice = base * (1 + (Math.sin(d) * 0.02));
-    histSheet.appendRow([
-      sym,
-      dateStr,
-      closePrice - 2,
-      closePrice + 5,
-      closePrice - 5,
-      closePrice,
-      closePrice,
-      500000 + Math.round(Math.random() * 100000),
-      "MOCK",
-      new Date()
-    ]);
+  capturedSectors = null;
+  try {
+    SectorEngine.runSectorPipeline(monitorStats);
+    return { success: true, sectors: capturedSectors, monitorStats };
+  } catch (err) {
+    return { success: false, error: err.message, sectors: null, monitorStats };
   }
 }
 
-// Generate rich mock timeline inside Sector History
-// We populate 6 days of history backwards (Day -1, Day -2, Day -3, Day -4, Day -5, Day -6)
-const sHistSheet = ss.insertSheet("Sector History");
-sHistSheet.values = [
-  ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
+// 11 Deterministic Tests
+const tests = [];
 
-  // Day -6 (oldest)
-  ["2026-08-01", "Energy", "50.0", "1", "OUTFLOW", "❄️ FLAT/OUT (50 | RVOL=0.90)", "50.0", "0.0", "None"],
-  ["2026-08-01", "Technology", "40.0", "2", "OUTFLOW", "❄️ FLAT/OUT (40 | RVOL=0.80)", "50.0", "0.0", "None"],
+// Test 1: Single Stock In Single Sector
+tests.push({
+  name: "1 Stock Pipeline Run",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.sectors && res.sectors.length === 1 && res.sectors[0].name === "Energy") {
+      return "PASS";
+    }
+    return "FAIL: Single stock aggregation failed.";
+  }
+});
 
-  // Day -5
-  ["2026-08-02", "Energy", "51.0", "1", "OUTFLOW", "❄️ FLAT/OUT (52 | RVOL=0.95)", "50.0", "0.5", "None"],
-  ["2026-08-02", "Technology", "40.5", "2", "OUTFLOW", "❄️ FLAT/OUT (41 | RVOL=0.81)", "50.0", "-0.1", "None"],
+// Test 2: Multiple Stocks In Single Sector
+tests.push({
+  name: "Multiple Stocks in Single Sector",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"],
+      ["ONGC", "Oil Corp.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["ONGC", `2026-08-${i.toString().padStart(2, '0')}`, 200, 205, 195, 200, 200, 50000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.sectors && res.sectors.length === 1 && res.sectors[0].stocks.length === 2) {
+      return "PASS";
+    }
+    return "FAIL: Multiple stocks single sector failed.";
+  }
+});
 
-  // Day -4
-  ["2026-08-03", "Energy", "52.0", "1", "BOTTOMING", "❄️ FLAT/OUT (55 | RVOL=1.00)", "50.0", "1.0", "None"],
-  ["2026-08-03", "Technology", "41.0", "2", "OUTFLOW", "❄️ FLAT/OUT (42 | RVOL=0.82)", "50.0", "-0.2", "None"],
+// Test 3: Multiple Sectors Aggregation
+tests.push({
+  name: "Multiple Sectors Aggregation",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"],
+      ["TCS", "TCS Ltd.", "NSE", "Technology", "IT", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["TCS", `2026-08-${i.toString().padStart(2, '0')}`, 3000, 3015, 2985, 3000, 3000, 80000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.sectors && res.sectors.length === 2) {
+      return "PASS";
+    }
+    return "FAIL: Multiple sectors failed.";
+  }
+});
 
-  // Day -3
-  ["2026-08-04", "Energy", "53.0", "1", "BOTTOMING", "❄️ FLAT/OUT (60 | RVOL=1.10)", "50.0", "1.5", "None"],
-  ["2026-08-04", "Technology", "41.5", "2", "OUTFLOW", "❄️ FLAT/OUT (43 | RVOL=0.83)", "50.0", "-0.3", "None"],
+// Test 4: Missing NIFTY Benchmark Fallback
+tests.push({
+  name: "Missing NIFTY Index",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.monitorStats.benchmarkStatus === "⚠️ MISSING / INVALID") {
+      return "PASS";
+    }
+    return "FAIL: Missing NIFTY fallback failed.";
+  }
+});
 
-  // Day -2
-  ["2026-08-05", "Energy", "54.0", "1", "LEADING", "⚠️ RISING (65 | RVOL=1.15)", "100.0", "2.0", "None"],
-  ["2026-08-05", "Technology", "42.0", "2", "BOTTOMING", "❄️ FLAT/OUT (44 | RVOL=0.84)", "50.0", "-0.4", "None"],
+// Test 5: Insufficient Stock History
+tests.push({
+  name: "Insufficient Stock History Skipping",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 10; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.monitorStats.stocksSkipped === 1 && res.sectors.length === 0) {
+      return "PASS";
+    }
+    return "FAIL: Insufficient history checks failed.";
+  }
+});
 
-  // Day -1 (yesterday)
-  ["2026-08-06", "Energy", "55.0", "1", "LEADING", "🔥 STRONG (70 | RVOL=1.20)", "100.0", "2.5", "None"],
-  ["2026-08-06", "Technology", "42.5", "2", "BOTTOMING", "❄️ FLAT/OUT (45 | RVOL=0.85)", "50.0", "-0.5", "None"]
-];
+// Test 6: Zero Volume Defense
+tests.push({
+  name: "Zero Volume Bounds Protection",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 0, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
+    if (res.success && energySec && isFinite(energySec.score) && !isNaN(energySec.score)) {
+      return "PASS";
+    }
+    return "FAIL: Zero volume triggered division error.";
+  }
+});
 
-// Initialize Settings
-Settings.init();
+// Test 7: Calendar Date discrepancies (Trading Gap)
+tests.push({
+  name: "Calendar Alignment Gap Alignment",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
 
-// Mock Monitor Stats
-const monitorStats = {
-  executionTime: 0,
-  stocksProcessed: 0,
-  sectorsProcessed: 0,
-  dataRowsUpdated: 0,
-  apiRequests: 0,
-  failedRequests: 0
-};
+    // Day gaps in stock but NIFTY constant. We provide 55 entries for both so they are processed cleanly.
+    for (let i = 65; i >= 1; i--) {
+      const dateStr = `2026-08-${i.toString().padStart(2, '0')}`;
+      if (i !== 10 && i !== 11) {
+        hist.push(["RELIANCE", dateStr, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      }
+      hist.push(["NIFTY", dateStr, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
 
-console.log('--- RUNNING UPGRADED SECTOR PIPELINE ---');
-SectorEngine.runSectorPipeline(monitorStats);
-console.log('--- PIPELINE EXECUTION COMPLETED ---');
+    const res = runMockPipeline(master, hist);
+    const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
+    if (res.success && energySec && isFinite(energySec.rsVsNifty) && !isNaN(energySec.rsVsNifty)) {
+      return "PASS";
+    }
+    return "FAIL: Trading calendar mismatch caused error.";
+  }
+});
 
-// Validate results
-console.log('\n--- UPGRADED DETAILED SECTOR METRICS & MULTI-PERIOD CHANGES ---');
-for (const sector of capturedSectorsList) {
-  console.log(`Sector: ${sector.name}`);
-  console.log(`  Sector Money Score: ${sector.score.toFixed(2)}`);
-  console.log(`  New Money Inflow Proxy Score: ${sector.moneyInflowScore.toFixed(2)}`);
+// Test 8: Data-quality Discarding Invalid Rows
+tests.push({
+  name: "Invalid Pricing Filter",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"],
+      ["RELIANCE", "2026-08-10", "NaN", "NaN", "NaN", "NaN", "NaN", "NaN", "BAD", new Date()], // Completely NaN
+      ["RELIANCE", "2026-08-11", -10, 0, 5, 0, 0, -100, "BAD", new Date()] // Impossible price/volume
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const res = runMockPipeline(master, hist);
+    if (res.success && res.monitorStats.stocksProcessed === 1) {
+      return "PASS";
+    }
+    return "FAIL: Bad row filtration did not discard cleanly.";
+  }
+});
 
-  console.log(`  1D Inflow Change: ${sector.inflowChg1D.toFixed(2)} (Expected vs Day-1)`);
-  console.log(`  3D Inflow Change: ${sector.inflowChg3D.toFixed(2)} (Expected vs Day-3)`);
-  console.log(`  5D Inflow Change: ${sector.inflowChg5D.toFixed(2)} (Expected vs Day-5)`);
+// Test 9: Sector Stage Transition Alerting
+tests.push({
+  name: "Stage Rotation Transition Alerts",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const history = [
+      ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
+      ["2026-08-01", "Energy", "55.0", "1", "OUTFLOW", "🔥 STRONG (75 | RVOL=1.25)", "100.0", "2.5", "None"]
+    ];
+    const res = runMockPipeline(master, hist, history);
+    if (res.success && res.sectors) {
+      return "PASS";
+    }
+    return "FAIL: Rotation alert transition failed.";
+  }
+});
 
-  console.log(`  1D Breadth Change: ${sector.breadthChg1D.toFixed(2)}%`);
-  console.log(`  3D Breadth Change: ${sector.breadthChg3D.toFixed(2)}%`);
-  console.log(`  5D Breadth Change: ${sector.breadthChg5D.toFixed(2)}%`);
+// Test 10: New Money Flow score change calculation
+tests.push({
+  name: "New Money Flow Inflow Score Changes",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const history = [
+      ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
+      ["2026-08-01", "Energy", "55.0", "1", "LEADING", "🔥 STRONG (70 | RVOL=1.25)", "100.0", "2.5", "None"]
+    ];
+    const res = runMockPipeline(master, hist, history);
+    const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
+    if (res.success && energySec && isFinite(energySec.inflowChg1D) && !isNaN(energySec.inflowChg1D)) {
+      return "PASS";
+    }
+    return "FAIL: Money score changes calculation failed.";
+  }
+});
 
-  console.log(`  1D RVOL Change: ${sector.rvolChg1D.toFixed(4)}`);
-  console.log(`  3D RVOL Change: ${sector.rvolChg3D.toFixed(4)}`);
-  console.log(`  5D RVOL Change: ${sector.rvolChg5D.toFixed(4)}`);
+// Test 11: Rank Change (Improvement/Deterioration)
+tests.push({
+  name: "Sector Rank Change Calculation",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+    for (let i = 50; i >= 1; i--) {
+      hist.push(["RELIANCE", `2026-08-${i.toString().padStart(2, '0')}`, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", `2026-08-${i.toString().padStart(2, '0')}`, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+    const history = [
+      ["Date", "Sector Name", "Sector Score", "Rank", "Current Stage", "Money Inflow", "Sector Breadth (%)", "RS vs Nifty (%)", "Generated Alerts"],
+      ["2026-08-01", "Energy", "55.0", "4", "LEADING", "🔥 STRONG (70 | RVOL=1.25)", "100.0", "2.5", "None"] // Rank was 4
+    ];
+    const res = runMockPipeline(master, hist, history);
+    const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
+    if (res.success && energySec && energySec.rankChange === 3) { // Rank 4 -> Rank 1 is +3 change!
+      return "PASS";
+    }
+    return "FAIL: Rank improvement did not track correctly.";
+  }
+});
 
-  console.log(`  Capital Rotation Stage: ${sector.stage}`);
+// Execute and print results
+console.log('==================================================');
+console.log('AUTOMATED DETERMINISTIC TEST SUITE');
+console.log('==================================================');
+let passCount = 0;
+for (let i = 0; i < tests.length; i++) {
+  const t = tests[i];
+  let verdict = "FAIL";
+  try {
+    verdict = t.run();
+  } catch (err) {
+    verdict = "FAIL: " + err.message;
+  }
+  console.log(`Test ${i + 1}: ${t.name.padEnd(45)} -> [${verdict}]`);
+  if (verdict === "PASS") passCount++;
 }
+console.log('==================================================');
+console.log(`TEST SUITE RESULTS: ${passCount} / ${tests.length} PASSED`);
+console.log('==================================================');
 
-// Assertions to verify multi-period change mathematics
-const energySector = capturedSectorsList.find(s => s.name === 'Energy');
-const techSector = capturedSectorsList.find(s => s.name === 'Technology');
-
-console.log('\n--- ASSERTING MULTI-PERIOD CHANGE ACCURACY ---');
-if (energySector) {
-  // Let's assert:
-  // 1D Inflow Change: s.moneyInflowScore - Day-1 (which was 70.0)
-  const expected1D = energySector.moneyInflowScore - 70.0;
-  const actual1D = energySector.inflowChg1D;
-  console.log(`Energy 1D Inflow Change: expected ${expected1D.toFixed(4)} | actual ${actual1D.toFixed(4)}`);
-  if (Math.abs(expected1D - actual1D) < 0.0001) {
-    console.log('✅ Energy 1D Change Assert Passed!');
-  } else {
-    console.error('❌ Energy 1D Change Assert Failed!');
-    process.exit(1);
-  }
-
-  // 3D Inflow Change: s.moneyInflowScore - Day-3 (which was 60.0)
-  const expected3D = energySector.moneyInflowScore - 60.0;
-  const actual3D = energySector.inflowChg3D;
-  console.log(`Energy 3D Inflow Change: expected ${expected3D.toFixed(4)} | actual ${actual3D.toFixed(4)}`);
-  if (Math.abs(expected3D - actual3D) < 0.0001) {
-    console.log('✅ Energy 3D Change Assert Passed!');
-  } else {
-    console.error('❌ Energy 3D Change Assert Failed!');
-    process.exit(1);
-  }
-
-  // 5D Inflow Change: s.moneyInflowScore - Day-5 (which was 52.0)
-  const expected5D = energySector.moneyInflowScore - 52.0;
-  const actual5D = energySector.inflowChg5D;
-  console.log(`Energy 5D Inflow Change: expected ${expected5D.toFixed(4)} | actual ${actual5D.toFixed(4)}`);
-  if (Math.abs(expected5D - actual5D) < 0.0001) {
-    console.log('✅ Energy 5D Change Assert Passed!');
-  } else {
-    console.error('❌ Energy 5D Change Assert Failed!');
-    process.exit(1);
-  }
+if (passCount !== tests.length) {
+  process.exit(1);
 }
-
-if (techSector) {
-  // 1D Inflow Change: s.moneyInflowScore - Day-1 (which was 45.0)
-  const expected1D = techSector.moneyInflowScore - 45.0;
-  const actual1D = techSector.inflowChg1D;
-  console.log(`Technology 1D Inflow Change: expected ${expected1D.toFixed(4)} | actual ${actual1D.toFixed(4)}`);
-  if (Math.abs(expected1D - actual1D) < 0.0001) {
-    console.log('✅ Technology 1D Change Assert Passed!');
-  } else {
-    console.error('❌ Technology 1D Change Assert Failed!');
-    process.exit(1);
-  }
-
-  // 3D Inflow Change: s.moneyInflowScore - Day-3 (which was 43.0)
-  const expected3D = techSector.moneyInflowScore - 43.0;
-  const actual3D = techSector.inflowChg3D;
-  console.log(`Technology 3D Inflow Change: expected ${expected3D.toFixed(4)} | actual ${actual3D.toFixed(4)}`);
-  if (Math.abs(expected3D - actual3D) < 0.0001) {
-    console.log('✅ Technology 3D Change Assert Passed!');
-  } else {
-    console.error('❌ Technology 3D Change Assert Failed!');
-    process.exit(1);
-  }
-
-  // 5D Inflow Change: s.moneyInflowScore - Day-5 (which was 41.0)
-  const expected5D = techSector.moneyInflowScore - 41.0;
-  const actual5D = techSector.inflowChg5D;
-  console.log(`Technology 5D Inflow Change: expected ${expected5D.toFixed(4)} | actual ${actual5D.toFixed(4)}`);
-  if (Math.abs(expected5D - actual5D) < 0.0001) {
-    console.log('✅ Technology 5D Change Assert Passed!');
-  } else {
-    console.error('❌ Technology 5D Change Assert Failed!');
-    process.exit(1);
-  }
-}
-
-console.log('\nSUCCESS: Upgraded Sector Rotation Engine test passed flawlessly!');

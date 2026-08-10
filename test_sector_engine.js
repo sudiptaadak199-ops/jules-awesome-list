@@ -169,7 +169,7 @@ function runMockPipeline(stockMasterData, historicalData, sectorHistoryData = []
   }
 }
 
-// 11 Deterministic Tests
+// 12 Deterministic Tests
 const tests = [];
 
 // Test 1: Single Stock In Single Sector
@@ -326,7 +326,7 @@ tests.push({
       ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
     ];
 
-    // Day gaps in stock but NIFTY constant. We provide 55 entries for both so they are processed cleanly.
+    // Day gaps in stock but NIFTY constant. We provide 65 entries for both so they are processed cleanly.
     for (let i = 65; i >= 1; i--) {
       const dateStr = `2026-08-${i.toString().padStart(2, '0')}`;
       if (i !== 10 && i !== 11) {
@@ -449,6 +449,49 @@ tests.push({
       return "PASS";
     }
     return "FAIL: Rank improvement did not track correctly.";
+  }
+});
+
+// Test 12: Look-Ahead Bias Prevention (Strict <= Date lookup)
+tests.push({
+  name: "Look-Ahead Bias Prevention (Strict <= Date)",
+  run: () => {
+    const master = [
+      ["Stock Symbol", "Company Name", "Exchange", "Sector", "Industry", "Status", "Last Processed", "Added Date"],
+      ["RELIANCE", "Reliance Ltd.", "NSE", "Energy", "Oil", "Active", "", "2024-01-01"]
+    ];
+    const hist = [
+      ["Symbol", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Source", "Updated At"]
+    ];
+
+    // Provide a gap in NIFTY data:
+    // RELIANCE has a data point on 2026-08-06.
+    // NIFTY only has data points on 2026-08-05 and 2026-08-07 (future).
+    // The engine MUST select 2026-08-05 (close=21000) and NEVER select 2026-08-07 (close=23000) for 2026-08-06 start.
+
+    // Populate past/exact and future candles
+    hist.push(["RELIANCE", "2026-08-06", 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+    hist.push(["NIFTY", "2026-08-05", 21000, 21050, 20950, 21000, 21000, 1000000, "MOCK", new Date()]); // Past
+    hist.push(["NIFTY", "2026-08-07", 23000, 23050, 22950, 23000, 23000, 1000000, "MOCK", new Date()]); // Future
+
+    // Fill background 60 days to satisfy history check
+    for (let i = 60; i >= 1; i--) {
+      const dateStr = `2026-07-${i.toString().padStart(2, '0')}`;
+      hist.push(["RELIANCE", dateStr, 1000, 1005, 995, 1000, 1000, 100000, "MOCK", new Date()]);
+      hist.push(["NIFTY", dateStr, 20000, 20050, 19950, 20000, 20000, 1000000, "MOCK", new Date()]);
+    }
+
+    const res = runMockPipeline(master, hist);
+    const energySec = res.sectors && res.sectors.find(s => s.name === "Energy");
+
+    // We can evaluate findNiftyClose internally by checking the parsed return
+    // Since REILIANCE return is 0% (last days are 1000), if it used 2026-08-05 close (21000), Nifty ret is (20000 - 21000)/21000 = -4.7%. RS is 0 - (-4.7) = +4.7%.
+    // If it incorrectly selected 2026-08-07 (23000), Nifty ret would be (20000 - 23000)/23000 = -13%. RS would be +13%.
+    // Let's assert that RS is closer to +4.7% than +13%!
+    if (res.success && energySec && energySec.rsVsNifty < 10.0) {
+      return "PASS";
+    }
+    return "FAIL: Look-ahead bias detected. Selected future NIFTY date.";
   }
 });
 

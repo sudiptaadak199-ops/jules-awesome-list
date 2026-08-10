@@ -183,8 +183,8 @@ class SheetManager {
     var preloadedRows = [];
     var now = new Date();
 
-    // Loop backwards for 30 trading days to construct historical prices
-    for (var d = 30; d >= 1; d--) {
+    // Loop backwards for 60 trading days to construct historical prices (sufficient for 50D history limit!)
+    for (var d = 60; d >= 1; d--) {
       var dateObj = new Date(now.getTime() - d * 24 * 60 * 60 * 1000);
       var dateStr = PlatformUtils.formatDate(dateObj);
 
@@ -200,7 +200,7 @@ class SheetManager {
         if (sym === "HDFCBANK" || sym === "ICICIBANK" || sym === "SBIN") sectorTrend = 0.1; // Financials improving
         if (sym === "TATAMOTORS" || sym === "M&M") sectorTrend = 0.4; // Auto leading
 
-        var changeFactor = 1.0 + (sectorTrend * (30 - d) / 100) + (Math.sin(d + i) * 1.5 / 100);
+        var changeFactor = 1.0 + (sectorTrend * (60 - d) / 100) + (Math.sin(d + i) * 1.5 / 100);
         var closePrice = base * changeFactor;
         var openPrice = closePrice * (1.0 - (Math.random() - 0.5) * 1.0 / 100);
         var highPrice = Math.max(openPrice, closePrice) * (1.0 + Math.random() * 0.5 / 100);

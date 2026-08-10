@@ -129,21 +129,32 @@ class SectorEngine {
         benchmarkStatus = "⚠️ MISSING / INVALID";
       }
 
-      // Helper function to find the NIFTY close on or closest to a target date string
+      // Helper function to find the NIFTY close on or most recent before target date string (strictly <= targetDate, preventing look-ahead bias!)
       var findNiftyClose = function(targetDateStr) {
         if (niftyHistory.length === 0) return 0.0;
         var targetTime = new Date(targetDateStr).getTime();
-        var closestEntry = niftyHistory[0];
-        var minDiff = Math.abs(new Date(closestEntry.date).getTime() - targetTime);
+        var bestEntry = null;
+        var minPastDiff = Infinity;
 
-        for (var n = 1; n < niftyHistory.length; n++) {
-          var diff = Math.abs(new Date(niftyHistory[n].date).getTime() - targetTime);
-          if (diff < minDiff) {
-            minDiff = diff;
-            closestEntry = niftyHistory[n];
+        // Loop chronologically to find the closest entry where entry.date <= targetDate
+        for (var n = 0; n < niftyHistory.length; n++) {
+          var entryTime = new Date(niftyHistory[n].date).getTime();
+          var diff = targetTime - entryTime; // Positive diff means entry is in the past or exact same day (<= targetDate)
+
+          if (diff >= 0) {
+            if (diff < minPastDiff) {
+              minPastDiff = diff;
+              bestEntry = niftyHistory[n];
+            }
           }
         }
-        return closestEntry.close;
+
+        // If no past/exact date is found, fallback to Nifty's oldest available historical record
+        if (!bestEntry) {
+          bestEntry = niftyHistory[0];
+        }
+
+        return bestEntry.close;
       };
 
       var stocksSufficient = 0;

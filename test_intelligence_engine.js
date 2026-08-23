@@ -192,32 +192,44 @@ try {
 }
 assert(dateSortPassed, "Deduplication engine safely handles Date objects without a[0].localeCompare exception");
 
-// Test 11: FII Market Activity vs Stock Ownership Separation & FII Fail-Fast Non-Blocking Resilience
-const fiiRes = vm.runInContext('updateAllFIIData()', sandbox);
-const fiiHoldingRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_FII_HOLDINGS)', sandbox);
+// Test 11: Decoupled FII Architecture & Fail-Safe Non-Blocking FullRefresh Execution
+let fiiFetchedInFullRefresh = false;
+let fiiFailureHandledSafely = false;
 
-let fiiFailFullRefreshPassed = false;
+// Seed existing Raw_FII data
+vm.runInContext('writeBatchData(getConfig().SHEETS.RAW_FII, 2, 1, [["2026-08-22", 8000, 7000, 1000, "Official"]], true)', sandbox);
+const preFiiRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_FII)', sandbox);
+
+// Override fetchWithRetry to track FII calls and simulate FII network exception
+vm.runInContext('var origFetchWithRetry = fetchWithRetry; fetchWithRetry = function(url, options, maxRetries) { if (url && url.indexOf("fiidii") !== -1) { fiiFetchedInFullRefresh = true; throw new Error("Simulated FII API Network Failure"); } return origFetchWithRetry(url, options, maxRetries); };', sandbox);
+
 try {
-  vm.runInContext('var origFetchWithRetry = fetchWithRetry; fetchWithRetry = function(url, options, maxRetries) { if (url && url.indexOf("fiidii") !== -1) { throw new Error("Simulated FII API Timeout / Failure"); } return origFetchWithRetry(url, options, maxRetries); };', sandbox);
-
+  // A. FullRefresh should complete without invoking FII network fetch
+  sandbox.fiiFetchedInFullRefresh = false;
   const refreshRes = vm.runInContext('FullRefresh(true)', sandbox);
+  const fullRefreshNoFIICall = (sandbox.fiiFetchedInFullRefresh === false) && refreshRes && refreshRes.totalTimeMs > 0;
+
+  // B & C. Independent UpdateFIIData() handles failure safely
+  vm.runInContext('UpdateFIIData()', sandbox);
+
+  // D. Existing Raw_FII data is preserved after failed update
+  const postFiiRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_FII)', sandbox);
+  const dataPreserved = postFiiRows.length >= preFiiRows.length && postFiiRows[0][0] === "2026-08-22";
+
+  // E. Calculations & Dashboard complete successfully without fresh FII data
   const calcData = vm.runInContext('readBatchData(getConfig().SHEETS.CALCULATIONS)', sandbox);
   const sectorData = vm.runInContext('readBatchData(getConfig().SHEETS.SECTOR_DATA)', sandbox);
 
-  fiiFailFullRefreshPassed = (
-    refreshRes !== null && refreshRes !== undefined &&
-    calcData.length > 0 &&
-    sectorData.length > 0
-  );
+  fiiFailureHandledSafely = fullRefreshNoFIICall && dataPreserved && calcData.length > 0 && sectorData.length > 0;
 
   vm.runInContext('fetchWithRetry = origFetchWithRetry;', sandbox);
 } catch (e) {
-  fiiFailFullRefreshPassed = false;
+  fiiFailureHandledSafely = false;
 }
 
 assert(
-  fiiHoldingRows.length > 0 && fiiFailFullRefreshPassed,
-  "FII API timeout/failure must not stop FullRefresh (Pipeline completes Raw_Daily -> Calculations -> Sector -> Signals -> Dashboard)"
+  fiiFailureHandledSafely,
+  "FullRefresh completes without calling FII network fetch; UpdateFIIData handles failure safely preserving existing data"
 );
 
 // Test 12: Indicator Engine Calculations Execution

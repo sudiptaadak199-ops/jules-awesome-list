@@ -85,8 +85,12 @@ function InitializeProject() {
 }
 
 /**
- * Resumable Stage-Based Full Refresh Pipeline with Performance Timing Metrics.
- * Tracks stage checkpoints via PropertiesService to handle 2,800+ stock scalability.
+ * Core FullRefresh Pipeline:
+ * NSE Data -> Calculations -> Sector Engine -> Signal Engine -> Dashboard
+ *
+ * ARCHITECTURAL DIRECTIVE:
+ * Blocking FII network fetching is EXPLICITLY REMOVED from the critical synchronous FullRefresh path.
+ * FII enrichment is handled asynchronously/independently via UpdateFIIData() or scheduledFIIUpdate().
  */
 function FullRefresh(forceFromStage1) {
   var startTime = new Date().getTime();
@@ -107,12 +111,16 @@ function FullRefresh(forceFromStage1) {
   var stocksProcessed = 0;
 
   try {
-    // Stage 1: System Initialization & Data Ingestion
+    // Stage 1: System Initialization & Core NSE Daily Data Ingestion
     if (currentStage === "START" || currentStage === "STAGE_1_COMPLETE") {
       var s1 = new Date().getTime();
       InitializeProject();
       recordsProcessed = updateNSEDataInSheet();
-      updateAllFIIData();
+
+      // Log explicit notification regarding FII decoupled architecture
+      logSystem("INFO", "FIIData", "FII enrichment skipped from synchronous FullRefresh.", null);
+      logSystem("INFO", "FIIData", "Use UpdateFIIData() for independent FII refresh.", null);
+
       tIngest = new Date().getTime() - s1;
 
       if (props) props.setProperty("PIPELINE_LAST_STAGE", "STAGE_1_COMPLETE");
@@ -161,7 +169,6 @@ function FullRefresh(forceFromStage1) {
 
     var totalTime = new Date().getTime() - startTime;
 
-    // Performance Timing Metrics Output
     var perfSummary = {
       totalTimeMs: totalTime,
       ingestTimeMs: tIngest,
@@ -183,16 +190,30 @@ function FullRefresh(forceFromStage1) {
 }
 
 /**
- * Individual Menu Command Wrappers
+ * Independent FII Refresh Menu Command
  */
+function UpdateFIIData() {
+  logSystem("INFO", "Main", "Executing independent FII data refresh...", null);
+  var res = updateAllFIIData();
+  logSystem("INFO", "Main", "Independent FII update completed. Market records: " + res.marketRecords + ", Holdings: " + res.stockHoldings, null);
+  return res;
+}
+
+/**
+ * Dedicated Time-Driven Callback for Background FII Ingestion
+ */
+function scheduledFIIUpdate() {
+  logSystem("INFO", "Main", "Executing scheduled background FII update...", null);
+  try {
+    UpdateFIIData();
+  } catch (e) {
+    logSystem("WARN", "Main", "Scheduled background FII update failed safely: " + e.message, null);
+  }
+}
+
 function UpdateNSEData() {
   var count = updateNSEDataInSheet();
   logSystem("INFO", "Main", "Updated " + count + " NSE daily records.", null);
-}
-
-function UpdateFIIData() {
-  var res = updateAllFIIData();
-  logSystem("INFO", "Main", "Updated FII data. Market records: " + res.marketRecords + ", Holdings: " + res.stockHoldings, null);
 }
 
 function CalculateIndicators() {
@@ -244,7 +265,15 @@ function StartAutoUpdate() {
       .timeBased()
       .everyHours(2)
       .create();
-    logSystem("INFO", "Main", "Started automated 2-hour update trigger.", null);
+
+    // Optional independent daily FII background trigger
+    ScriptApp.newTrigger("scheduledFIIUpdate")
+      .timeBased()
+      .everyDays(1)
+      .atHour(18)
+      .create();
+
+    logSystem("INFO", "Main", "Started automated triggers: 2-hour NSE pipeline & daily 6 PM FII update.", null);
   }
 }
 
@@ -252,7 +281,8 @@ function StopAutoUpdate() {
   if (typeof ScriptApp !== "undefined" && ScriptApp.getProjectTriggers) {
     var triggers = ScriptApp.getProjectTriggers();
     for (var i = 0; i < triggers.length; i++) {
-      if (triggers[i].getHandlerFunction() === "scheduledUpdateData") {
+      var handler = triggers[i].getHandlerFunction();
+      if (handler === "scheduledUpdateData" || handler === "scheduledFIIUpdate") {
         ScriptApp.deleteTrigger(triggers[i]);
       }
     }

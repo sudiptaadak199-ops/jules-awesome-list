@@ -50,10 +50,10 @@ function calculateAllIndicators() {
     fiiMap[fh[0]] = safeNumber(fh[3], 0); // Change in FII %
   }
 
-  // Calculate Nifty 20D Return as benchmark
+  // Calculate Nifty 20D Return as benchmark (prior 20 days relative to latest)
   var niftyHistory = stockHistory["NIFTY"] || [];
   var nifty20DReturn = 0;
-  if (niftyHistory.length >= 20) {
+  if (niftyHistory.length >= 21) {
     niftyHistory.sort(function(a, b) { return a[0].localeCompare(b[0]); });
     var latestNifty = safeNumber(niftyHistory[niftyHistory.length - 1][6], 1);
     var prev20Nifty = safeNumber(niftyHistory[niftyHistory.length - 21][6], latestNifty);
@@ -68,7 +68,7 @@ function calculateAllIndicators() {
     var history = stockHistory[symbol];
     if (history.length === 0) continue;
 
-    // Sort ascending by Date
+    // Sort ascending by Date (oldest to newest)
     history.sort(function(a, b) { return a[0].localeCompare(b[0]); });
 
     var latest = history[history.length - 1];
@@ -87,23 +87,31 @@ function calculateAllIndicators() {
     var delQtys = history.map(function(h) { return safeNumber(h[11], 0); });
     var closes = history.map(function(h) { return safeNumber(h[6], 0); });
 
-    // Moving Averages for Volume
-    var avgVol5D = calculateSMA(volumes.slice(-5));
-    var avgVol20D = calculateSMA(volumes.slice(-20));
-    var avgVol50D = calculateSMA(volumes.slice(-50));
+    // STRICT NO LOOK-AHEAD / NO SELF-INCLUSION RULE:
+    // Historical 20D baselines MUST use the 20 trading days PRIOR to the current day (excluding today).
+    var histVolumes20D = history.length >= 21 ? volumes.slice(-21, -1) : volumes.slice(0, Math.max(1, volumes.length - 1));
+    var histVolumes5D = history.length >= 6 ? volumes.slice(-6, -1) : volumes.slice(0, Math.max(1, volumes.length - 1));
+    var histVolumes50D = history.length >= 51 ? volumes.slice(-51, -1) : volumes.slice(0, Math.max(1, volumes.length - 1));
 
-    // Volume Acceleration: Avg Vol 5D / Previous 5D Average
-    var prev5DVolSlice = volumes.length >= 10 ? volumes.slice(-10, -5) : volumes.slice(0, Math.max(1, volumes.length - 5));
+    var avgVol5D = calculateSMA(histVolumes5D);
+    var avgVol20D = calculateSMA(histVolumes20D);
+    var avgVol50D = calculateSMA(histVolumes50D);
+
+    // Volume Acceleration: Avg Vol 5D (prior 5 days) / Previous 5D Average (days -10 to -5)
+    var prev5DVolSlice = history.length >= 11 ? volumes.slice(-11, -6) : volumes.slice(0, Math.max(1, volumes.length - 6));
     var prev5DAvgVol = calculateSMA(prev5DVolSlice);
     var volAcceleration = prev5DAvgVol > 0 ? avgVol5D / prev5DAvgVol : 1.0;
 
-    // RVOL = Current Volume / Average 20D Volume
+    // RVOL = Current Volume / Average 20D Historical Volume (excluding today)
     var rvol = avgVol20D > 0 ? currentVolume / avgVol20D : 1.0;
     var volumeSpikePct = (rvol - 1) * 100;
 
-    // Moving Averages for Delivery
-    var avgDel5D = calculateSMA(delQtys.slice(-5));
-    var avgDel20D = calculateSMA(delQtys.slice(-20));
+    // Delivery Historical Averages (excluding today)
+    var histDelQtys20D = history.length >= 21 ? delQtys.slice(-21, -1) : delQtys.slice(0, Math.max(1, delQtys.length - 1));
+    var histDelQtys5D = history.length >= 6 ? delQtys.slice(-6, -1) : delQtys.slice(0, Math.max(1, delQtys.length - 1));
+
+    var avgDel5D = calculateSMA(histDelQtys5D);
+    var avgDel20D = calculateSMA(histDelQtys20D);
     var delAcceleration = avgDel20D > 0 ? currentDelQty / avgDel20D : 1.0;
 
     // Price Returns
@@ -112,7 +120,7 @@ function calculateAllIndicators() {
     var return5D = close5DAgo > 0 ? ((currentPrice / close5DAgo) - 1) * 100 : 0;
     var return20D = close20DAgo > 0 ? ((currentPrice / close20DAgo) - 1) * 100 : 0;
 
-    // EMAs calculated forward in time
+    // EMAs forward in time
     var ema20 = calculateEMA(closes, 20);
     var ema50 = calculateEMA(closes, 50);
     var priceVsEMA20 = ema20 > 0 ? ((currentPrice - ema20) / ema20) * 100 : 0;
@@ -128,26 +136,28 @@ function calculateAllIndicators() {
     // Relative Strength vs Nifty
     var rsVsNifty = return20D - nifty20DReturn;
 
-    // Low Selling Pressure Proxy Calculation
-    var sellerPressures20D = history.slice(-20).map(function(h) {
-      var v = safeNumber(h[8], 0);
-      var dPct = safeNumber(h[12], 0) / 100;
-      var nonDelVol = v * (1 - dPct);
-      return nonDelVol;
-    });
-    var seller20DAvg = calculateSMA(sellerPressures20D);
-
-    var sellerPressures5D = history.slice(-5).map(function(h) {
+    // Selling Pressure Proxy Calculation:
+    // Proxy Formula = Total Volume * (1 - Delivery %) representing speculative / non-delivery traded volume.
+    // 20D Average Selling Pressure Proxy uses historical 20 trading days prior to current day.
+    var histSellerPressures20D = (history.length >= 21 ? history.slice(-21, -1) : history.slice(0, Math.max(1, history.length - 1))).map(function(h) {
       var v = safeNumber(h[8], 0);
       var dPct = safeNumber(h[12], 0) / 100;
       return v * (1 - dPct);
     });
-    var seller5DAvg = calculateSMA(sellerPressures5D);
+    var seller20DAvg = calculateSMA(histSellerPressures20D);
+
+    var histSellerPressures5D = (history.length >= 6 ? history.slice(-6, -1) : history.slice(0, Math.max(1, history.length - 1))).map(function(h) {
+      var v = safeNumber(h[8], 0);
+      var dPct = safeNumber(h[12], 0) / 100;
+      return v * (1 - dPct);
+    });
+    var seller5DAvg = calculateSMA(histSellerPressures5D);
     var sellerTrend = seller5DAvg < seller20DAvg ? "Decreasing Pressure" : "Increasing Pressure";
 
     var fiiChange = fiiMap[symbol] || 0;
 
     // Stock Rotation Score Calculation (0-100 normalized)
+    // Weights: 40% 20D Return, 30% RS vs Nifty, 20% RVOL, 10% EMA Trend
     var normReturn20D = normalizeToRange(return20D, -15, 25);
     var normRS = normalizeToRange(rsVsNifty, -20, 20);
     var normRVOL = normalizeToRange(rvol, 0.5, 5.0);
@@ -166,6 +176,7 @@ function calculateAllIndicators() {
     );
 
     // New Money Inflow Score Calculation (0-100 normalized)
+    // Weights: 40% RVOL, 30% Vol Accel, 20% Delivery Accel, 10% RS
     var normVolAccel = normalizeToRange(volAcceleration, 0.5, 3.0);
     var normDelAccel = normalizeToRange(delAcceleration, 0.5, 3.0);
 
@@ -182,6 +193,7 @@ function calculateAllIndicators() {
     );
 
     // Big Money Initial Entry Score Calculation (0-100)
+    // Weights: RVOL (20%), Vol Accel (15%), Delivery (20%), Price Trend (15%), RS (10%), Low Seller (10%), Sector (5%), FII Holding (5%)
     var normLowSeller = seller20DAvg < (settings["SELLER_THRESHOLD"] || 40000) ? 100 : normalizeToRange(40000 - seller20DAvg, -100000, 40000);
     var normFII = normalizeToRange(fiiChange, -2.0, 5.0);
 

@@ -57,7 +57,7 @@ function getConfig() {
         "Volume", "Avg Vol 5D", "Avg Vol 20D", "Avg Vol 50D", "RVOL", "Volume Spike %", "Volume Acceleration",
         "Delivery Qty", "Delivery %", "Avg Delivery 5D", "Avg Delivery 20D", "Delivery Acceleration",
         "5D Return", "20D Return", "EMA20", "EMA50", "Price vs EMA20 %", "Price vs EMA50 %", "EMA Trend",
-        "RS vs Nifty", "20D Avg Seller", "5D Avg Seller", "Seller Trend", "FII Holding Change",
+        "RS vs Nifty", "20D Avg Selling Pressure Proxy", "5D Avg Selling Pressure Proxy", "Seller Trend", "FII Holding Change",
         "Stock Rotation Score", "New Money Inflow Score", "Big Money Entry Score", "Final Signal", "Signal Date"
       ],
       SECTOR_DATA: [
@@ -67,11 +67,11 @@ function getConfig() {
       ],
       SIGNALS: [
         "Signal ID", "Date", "Symbol", "Company", "Sector", "Signal Type", "Trigger Price",
-        "RVOL", "Delivery %", "Vol Accel", "20D Avg Seller", "Rotation Score", "New Money Score", "Big Money Score", "Status"
+        "RVOL", "Delivery %", "Vol Accel", "20D Avg Selling Pressure Proxy", "Rotation Score", "New Money Score", "Big Money Score", "Status"
       ],
       HISTORICAL_LOG: [
         "Date", "Symbol", "Price", "Price Change %", "Volume", "RVOL", "Delivery Qty", "Delivery %",
-        "Vol Accel", "20D Avg Seller", "RS vs Nifty", "Sector", "Sector Stage", "Rotation Score", "New Money Score", "Big Money Score", "Signals Generated"
+        "Vol Accel", "20D Avg Selling Pressure Proxy", "RS vs Nifty", "Sector", "Sector Stage", "Rotation Score", "New Money Score", "Big Money Score", "Signals Generated"
       ],
       BACKTEST: [
         "Trade ID", "Strategy", "Symbol", "Entry Date", "Entry Price", "Exit Date", "Exit Price",
@@ -94,7 +94,7 @@ function getConfig() {
       ["RVOL_THRESHOLD_EXTREME", 10.0, "RVOL extreme threshold", "RVOL"],
       ["RVOL_THRESHOLD_ULTRA_EXTREME", 20.0, "RVOL scanner threshold (20x+)", "RVOL"],
 
-      ["SELLER_THRESHOLD", 40000, "20D Average Seller pressure threshold (Max allowed)", "Seller System"],
+      ["SELLER_THRESHOLD", 40000, "20D Average Selling Pressure Proxy threshold (Max allowed)", "Seller System"],
       ["DELIVERY_ACCEL_STRONG", 1.2, "Strong delivery acceleration threshold", "Delivery"],
       ["VOL_ACCEL_INCREASING", 1.1, "Volume acceleration increasing threshold", "Volume"],
       ["VOL_ACCEL_STRONG", 1.3, "Volume acceleration strong threshold", "Volume"],
@@ -114,7 +114,7 @@ function getConfig() {
       ["BIG_MONEY_W_DELIVERY", 0.20, "Big Money Entry weight: Delivery Quantity/Ratio", "Big Money Weights"],
       ["BIG_MONEY_W_PRICE_TREND", 0.15, "Big Money Entry weight: Price Trend (above EMA)", "Big Money Weights"],
       ["BIG_MONEY_W_RS", 0.10, "Big Money Entry weight: Relative Strength", "Big Money Weights"],
-      ["BIG_MONEY_W_LOW_SELLER", 0.10, "Big Money Entry weight: Low Seller Pressure (<40K)", "Big Money Weights"],
+      ["BIG_MONEY_W_LOW_SELLER", 0.10, "Big Money Entry weight: Low Selling Pressure Proxy (<40K)", "Big Money Weights"],
       ["BIG_MONEY_W_SECTOR", 0.05, "Big Money Entry weight: Sector Strength", "Big Money Weights"],
       ["BIG_MONEY_W_FII_HOLDING", 0.05, "Big Money Entry weight: FII Holding Increase", "Big Money Weights"],
 

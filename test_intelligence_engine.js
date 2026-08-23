@@ -183,7 +183,7 @@ assert(calcResults.length > 0, "Indicator engine executes calculations across ac
 
 // Test 13: RVOL Calculation Verification
 const halRow = calcResults.find(r => r[0] === "HAL");
-assert(halRow && halRow[10] >= 1.0, "RVOL calculated for HAL stock record");
+assert(halRow && halRow[10] >= 1.0, "RVOL calculated for HAL stock record using prior 20D baseline");
 
 // Test 14: Volume Acceleration Interpretation
 const volAccel = halRow[12];
@@ -191,7 +191,7 @@ assert(typeof volAccel === 'number' && volAccel > 0, "Volume Acceleration correc
 
 // Test 15: Low Selling Pressure Proxy (<40K)
 const seller20D = halRow[26];
-assert(typeof seller20D === 'number', "20D Average Seller pressure proxy calculated");
+assert(typeof seller20D === 'number', "20D Average Selling Pressure Proxy calculated");
 
 // Test 16: Normalized Stock Rotation Score (0-100)
 const rotScore = halRow[30];

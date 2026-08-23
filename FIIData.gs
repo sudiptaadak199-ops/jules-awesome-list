@@ -87,7 +87,9 @@ function updateFIIMarketActivity() {
 /**
  * Ingests Module B: Stock-Wise FII Ownership / Shareholding.
  * Tracks specific FII holding percentage changes quarter-over-quarter.
- * Rule: FII Increase = Current FII % - Previous FII %
+ * Rule: Stock-wise FII increase = Current FII % - Previous FII %
+ * Note: When stock-wise ownership feeds are unpopulated, fields are marked as "N/A" / 0
+ * to prevent fabricating fake stock-specific accumulation.
  */
 function updateStockFIIHoldings() {
   var config = getConfig();
@@ -101,21 +103,14 @@ function updateStockFIIHoldings() {
     var symbol = masterStocks[i][0];
     if (symbol === "NIFTY") continue;
 
-    // Shareholding data
-    var prevFII = Math.round((12 + (i * 1.7) % 25) * 100) / 100;
-    var currFII = Math.round((prevFII + ((i % 5) - 2) * 0.45) * 100) / 100;
-    var changeFII = Math.round((currFII - prevFII) * 100) / 100;
-
-    var trend = changeFII > 0.5 ? "Accumulation" : (changeFII < -0.5 ? "Distribution" : "Stable");
-
     var row = [
       symbol,
-      prevFII,
-      currFII,
-      changeFII,
+      "N/A",  // Previous FII % (Unfabricated placeholder)
+      "N/A",  // Current FII % (Unfabricated placeholder)
+      0,      // Change in FII %
       "Q3 FY24",
       "Q4 FY24",
-      trend,
+      "Awaiting Feed",
       formatDateKey(new Date())
     ];
 

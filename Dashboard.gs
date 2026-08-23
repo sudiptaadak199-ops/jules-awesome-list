@@ -73,7 +73,7 @@ function renderDashboard() {
     return [idx + 1, r[0], r[1], r[3], r[5], r[6], r[8], r[10], r[13], r[14], r[2], r[31]];
   });
 
-  // Panel 3: Low Selling Pressure Stocks (20D Avg Seller < 40K)
+  // Panel 3: Low Selling Pressure Stocks (20D Avg Selling Pressure Proxy < 40K)
   var sellerThreshold = settings["SELLER_THRESHOLD"] || 40000;
   var lowSellerRows = calcData.filter(function(r) {
     return safeNumber(r[26], 999999) < sellerThreshold;
@@ -85,9 +85,6 @@ function renderDashboard() {
 
   // Panel 4: FII / Institutional Activity
   var latestFII = fiiMarketData.length > 0 ? fiiMarketData[fiiMarketData.length - 1] : ["N/A", 0, 0, 0];
-  var topFIIHoldingIncrease = fiiHoldingsData.slice().sort(function(a, b) {
-    return safeNumber(b[3], 0) - safeNumber(a[3], 0);
-  }).slice(0, 10);
 
   // Panel 5: Potential Big Money Initial Entry
   var bigMoneyRows = calcData.filter(function(r) {
@@ -147,9 +144,9 @@ function renderDashboard() {
       }
 
       // Render Panel 3: Low Selling Pressure
-      dashSheet.getRange(currentRow, 1).setValue("👀 LOW SELLING PRESSURE STOCKS (20D Avg Seller < " + sellerThreshold.toLocaleString() + ")");
+      dashSheet.getRange(currentRow, 1).setValue("👀 LOW SELLING PRESSURE STOCKS (20D Avg Selling Pressure Proxy < " + sellerThreshold.toLocaleString() + ")");
       currentRow++;
-      var p3Headers = [["Symbol", "Price", "20D Avg Seller", "Volume", "Avg 20D Vol", "Delivery %", "Change %", "Sector", "New Money Score"]];
+      var p3Headers = [["Symbol", "Price", "20D Avg Selling Pressure Proxy", "Volume", "Avg 20D Vol", "Delivery %", "Change %", "Sector", "New Money Score"]];
       dashSheet.getRange(currentRow, 1, 1, p3Headers[0].length).setValues(p3Headers);
       currentRow++;
       if (lowSellerRows.length > 0) {
@@ -160,13 +157,13 @@ function renderDashboard() {
       // Render Panel 4: FII Activity
       dashSheet.getRange(currentRow, 1).setValue("🏦 FII / INSTITUTIONAL ACTIVITY MONITOR");
       currentRow++;
-      dashSheet.getRange(currentRow, 1).setValue("Market Activity Date: " + latestFII[0] + " | Buy: ₹" + latestFII[1] + " Cr | Sell: ₹" + latestFII[2] + " Cr | Net FII: ₹" + latestFII[3] + " Cr");
+      dashSheet.getRange(currentRow, 1).setValue("Market Activity Date: " + latestFII[0] + " | Buy: ₹" + latestFII[1] + " Cr | Sell: ₹" + latestFII[2] + " Cr | Net FII: ₹" + latestFII[3] + " Cr (Stock-wise holdings available in Raw_FII_Holdings)");
       currentRow += 2;
 
       // Render Panel 5: Big Money Entry
       dashSheet.getRange(currentRow, 1).setValue("💰 POTENTIAL BIG MONEY INITIAL ENTRY");
       currentRow++;
-      var p5Headers = [["Rank", "Symbol", "Company", "Sector", "Price", "RVOL", "Vol Accel", "Delivery %", "20D Seller", "Big Money Score", "Signal Status"]];
+      var p5Headers = [["Rank", "Symbol", "Company", "Sector", "Price", "RVOL", "Vol Accel", "Delivery %", "20D Selling Pressure Proxy", "Big Money Score", "Signal Status"]];
       dashSheet.getRange(currentRow, 1, 1, p5Headers[0].length).setValues(p5Headers);
       currentRow++;
       if (bigMoneyRows.length > 0) {

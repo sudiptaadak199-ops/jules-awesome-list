@@ -5,10 +5,10 @@
 
 /**
  * Scans calculated indicators and logs active trading intelligence signals into Signals and Historical_Log.
+ * Uses single-pass array construction and O(1) hash map indexing.
  */
 function generateSignalsAndSnapshot() {
   var config = getConfig();
-  var settings = getSettings();
 
   logSystem("INFO", "SignalEngine", "Generating active trading signals and snapshotting historical log...", null);
 
@@ -17,16 +17,18 @@ function generateSignalsAndSnapshot() {
     calcData = calculateAllIndicators();
   }
 
+  // Build sector stage hash map O(S) for O(1) lookup
   var sectorData = readBatchData(config.SHEETS.SECTOR_DATA);
   var sectorStageMap = {};
   for (var s = 0; s < sectorData.length; s++) {
-    sectorStageMap[sectorData[s][0]] = sectorData[s][11]; // Stage
+    sectorStageMap[sectorData[s][0]] = sectorData[s][11];
   }
 
   var todayStr = formatDateKey(new Date());
   var activeSignals = [];
   var historicalSnapshots = [];
 
+  // Single pass through calculation records O(N)
   for (var i = 0; i < calcData.length; i++) {
     var row = calcData[i];
     var symbol = row[0];
@@ -43,13 +45,12 @@ function generateSignalsAndSnapshot() {
     var signalType = row[33];
     var secStage = sectorStageMap[sector] || "Neutral";
 
-    // Build historical snapshot row
     var snapshotRow = [
       todayStr,
       symbol,
       price,
-      row[5], // Change %
-      row[6], // Volume
+      row[5],  // Change %
+      row[6],  // Volume
       rvol,
       row[13], // Delivery Qty
       delPct,
@@ -65,7 +66,6 @@ function generateSignalsAndSnapshot() {
     ];
     historicalSnapshots.push(snapshotRow);
 
-    // Filter active actionable signals
     if (signalType !== "NEUTRAL") {
       var sigId = "SIG_" + todayStr.replace(/-/g, "") + "_" + symbol;
       var sigRow = [
@@ -89,7 +89,7 @@ function generateSignalsAndSnapshot() {
     }
   }
 
-  // Write Active Signals
+  // Write Active Signals in a single batch
   writeBatchData(config.SHEETS.SIGNALS, 2, 1, activeSignals, true);
 
   // Append Historical Log incrementally without erasing past records
@@ -103,6 +103,7 @@ function generateSignalsAndSnapshot() {
 
 /**
  * Deduplicates and appends historical daily snapshots by composite key (Date_Symbol).
+ * Uses fast pre-normalized string comparisons (< and >) in sort.
  */
 function mergeHistoricalSnapshots(existingLogs, newSnapshots) {
   var logMap = {};
@@ -110,14 +111,22 @@ function mergeHistoricalSnapshots(existingLogs, newSnapshots) {
   for (var i = 0; i < existingLogs.length; i++) {
     var row = existingLogs[i];
     if (row && row[0] && row[1]) {
-      var key = makeCompositeKey(row[0], row[1]);
+      var dateStr = formatDateKey(row[0]);
+      var symStr = (row[1] || "").toString().trim().toUpperCase();
+      var key = makeCompositeKey(dateStr, symStr);
+      row[0] = dateStr;
+      row[1] = symStr;
       logMap[key] = row;
     }
   }
 
   for (var j = 0; j < newSnapshots.length; j++) {
     var nRow = newSnapshots[j];
-    var nKey = makeCompositeKey(nRow[0], nRow[1]);
+    var nDateStr = formatDateKey(nRow[0]);
+    var nSymStr = (nRow[1] || "").toString().trim().toUpperCase();
+    var nKey = makeCompositeKey(nDateStr, nSymStr);
+    nRow[0] = nDateStr;
+    nRow[1] = nSymStr;
     logMap[nKey] = nRow;
   }
 
@@ -126,9 +135,17 @@ function mergeHistoricalSnapshots(existingLogs, newSnapshots) {
     mergedList.push(logMap[k]);
   }
 
+  // Fast direct string comparison sort O(N log N)
   mergedList.sort(function(a, b) {
-    if (a[0] === b[0]) return a[1].localeCompare(b[1]);
-    return a[0].localeCompare(b[0]);
+    var dA = a[0];
+    var dB = b[0];
+    if (dA < dB) return -1;
+    if (dA > dB) return 1;
+    var sA = a[1];
+    var sB = b[1];
+    if (sA < sB) return -1;
+    if (sA > sB) return 1;
+    return 0;
   });
 
   return mergedList;

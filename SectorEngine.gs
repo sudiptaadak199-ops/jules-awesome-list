@@ -5,10 +5,10 @@
 
 /**
  * Aggregates stock-level indicators into sector performance metrics and classifies Sector Rotation Stages.
+ * Uses single-pass running totals for O(N) linear time sector aggregation.
  */
 function calculateSectorRotation() {
   var config = getConfig();
-  var settings = getSettings();
 
   logSystem("INFO", "SectorEngine", "Aggregating sector-level metrics and calculating rotation stages...", null);
 
@@ -18,7 +18,7 @@ function calculateSectorRotation() {
     calcData = calculateAllIndicators();
   }
 
-  // Group calculation records by Sector
+  // Group calculation records by Sector using running totals O(N)
   var sectorsMap = {};
 
   for (var i = 0; i < calcData.length; i++) {
@@ -31,12 +31,11 @@ function calculateSectorRotation() {
         totalStocks: 0,
         advancing: 0,
         declining: 0,
-        rvols: [],
-        volAccels: [],
-        returns20D: [],
-        rsVsNiftyList: [],
-        delPcts: [],
-        newMoneyScores: []
+        sumRvol: 0,
+        sumVolAccel: 0,
+        sumReturn20D: 0,
+        sumRS: 0,
+        sumDelPct: 0
       };
     }
 
@@ -47,12 +46,11 @@ function calculateSectorRotation() {
     if (changePct > 0) sec.advancing++;
     else if (changePct < 0) sec.declining++;
 
-    sec.rvols.push(safeNumber(row[10], 1.0));
-    sec.volAccels.push(safeNumber(row[12], 1.0));
-    sec.delPcts.push(safeNumber(row[14], 0));
-    sec.returns20D.push(safeNumber(row[19], 0));
-    sec.rsVsNiftyList.push(safeNumber(row[25], 0));
-    sec.newMoneyScores.push(safeNumber(row[31], 50));
+    sec.sumRvol += safeNumber(row[10], 1.0);
+    sec.sumVolAccel += safeNumber(row[12], 1.0);
+    sec.sumDelPct += safeNumber(row[14], 0);
+    sec.sumReturn20D += safeNumber(row[19], 0);
+    sec.sumRS += safeNumber(row[25], 0);
   }
 
   var sectorResults = [];
@@ -63,17 +61,17 @@ function calculateSectorRotation() {
     var total = s.totalStocks || 1;
     var breadthPct = Math.round((s.advancing / total) * 100);
 
-    var avgRvol = Math.round(calculateSMA(s.rvols) * 100) / 100;
-    var avgVolAccel = Math.round(calculateSMA(s.volAccels) * 100) / 100;
-    var avg20DReturn = Math.round(calculateSMA(s.returns20D) * 100) / 100;
-    var sectorRS = Math.round(calculateSMA(s.rsVsNiftyList) * 100) / 100;
-    var avgDelivery = Math.round(calculateSMA(s.delPcts) * 100) / 100;
+    var avgRvol = Math.round((s.sumRvol / total) * 100) / 100;
+    var avgVolAccel = Math.round((s.sumVolAccel / total) * 100) / 100;
+    var avg20DReturn = Math.round((s.sumReturn20D / total) * 100) / 100;
+    var sectorRS = Math.round((s.sumRS / total) * 100) / 100;
+    var avgDelivery = Math.round((s.sumDelPct / total) * 100) / 100;
 
     // Sector New Money Score Calculation (0-100)
     // Formula: 40% RVOL + 30% Vol Accel + 20% Breadth + 10% Sector RS
     var normRvol = normalizeToRange(avgRvol, 0.8, 3.0);
     var normVolAccel = normalizeToRange(avgVolAccel, 0.8, 2.0);
-    var normBreadth = breadthPct; // Already 0-100
+    var normBreadth = breadthPct;
     var normRS = normalizeToRange(sectorRS, -10, 10);
 
     var sectorMoneyScore = Math.round(
@@ -83,12 +81,6 @@ function calculateSectorRotation() {
       (normRS * 0.10)
     );
 
-    // Sector Stage Classification Rules:
-    // 1. Leading: Strong RS > 3% AND High Breadth > 60% AND Strong Returns
-    // 2. Improving: Positive RS > 0% AND Vol Acceleration > 1.1 AND Money Score >= 60
-    // 3. Accumulation / Early Rotation: High Volume/Money Score >= 70 BUT Price Return still < 2% (Initial entry)
-    // 4. Weakening: Positive RS BUT Breadth dropping < 40% OR Returns declining
-    // 5. Lagging: Negative RS < 0% AND Low Breadth < 40%
     var stage = "Lagging";
 
     if (sectorMoneyScore >= 70 && avg20DReturn <= 3.0) {
@@ -122,7 +114,7 @@ function calculateSectorRotation() {
     sectorResults.push(row);
   }
 
-  // Sort sectors descending by Sector New Money Score
+  // Fast direct score sorting
   sectorResults.sort(function(a, b) { return b[10] - a[10]; });
 
   writeBatchData(config.SHEETS.SECTOR_DATA, 2, 1, sectorResults, true);

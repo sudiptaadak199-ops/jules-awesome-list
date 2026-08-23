@@ -1,12 +1,15 @@
 /**
  * test_intelligence_engine.js - Comprehensive Local Node.js Test Suite
  * Validates business logic, indicator calculations, scoring algorithms,
- * deduplication, FII separation, backtesting, and self-healing initialization.
+ * deduplication, FII separation, backtesting, performance benchmarks, and resumable execution.
  */
 
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+
+// Mock Script Properties Storage
+const scriptProperties = {};
 
 // Mock Google Apps Script Global Objects
 const sandbox = {
@@ -18,6 +21,15 @@ const sandbox = {
   },
   Utilities: {
     sleep: function(ms) { /* no-op in tests */ }
+  },
+  PropertiesService: {
+    getScriptProperties: function() {
+      return {
+        getProperty: function(key) { return scriptProperties[key] || null; },
+        setProperty: function(key, val) { scriptProperties[key] = val.toString(); },
+        deleteProperty: function(key) { delete scriptProperties[key]; }
+      };
+    }
   }
 };
 
@@ -163,9 +175,8 @@ assert(!invalidRecord.valid && invalidRecord.errors.length >= 2, "validateDailyD
 const histCount = vm.runInContext('updateNSEDataInSheet()', sandbox);
 assert(histCount > 100, "NSEData seeds multi-day historical price/volume archives into Raw_Daily");
 
-// Test 10: Incremental Primary Key Deduplication & Date Objects Sorting Fix
+// Test 10: Fast String Sort & Deduplication Engine
 const initialRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_DAILY)', sandbox);
-// Add a row with a native Date object to test type safety during localeCompare sort
 const testDateObjRow = [new Date("2026-08-23"), "TCS", "EQ", 4000, 4200, 3950, 4150, 4100, 1000000, 4150000000, 20000, 750000, 75];
 const testNewRow = ["2026-08-23", "HAL", "EQ", 4000, 4200, 3950, 4150, 4100, 1000000, 4150000000, 20000, 750000, 75];
 sandbox.initialRows = initialRows;
@@ -239,33 +250,38 @@ assert(backtestRes && backtestRes.totalTrades >= 0, "Backtest engine executes tr
 // Test 24: Strategy Performance Summary Metrics
 assert(typeof backtestRes.winRate === 'number' && typeof backtestRes.profitFactor === 'number', "Computes Win Rate %, Profit Factor, and trade returns");
 
-// Test 25: Full Refresh Master Orchestrator Pipeline & 2,800+ Records Bulk Scaling
-sandbox.bulk2800Rows = [];
+// Test 25: Performance Benchmark & Resumable Stage Execution Test (2,800+ Stocks & 100,000+ Records)
+sandbox.bulk100kRows = [];
 for (let b = 0; b < 2800; b++) {
-  sandbox.bulk2800Rows.push([
-    new Date("2026-08-23"),
-    "STOCK_" + b,
-    "EQ",
-    100 + (b % 500),
-    105 + (b % 500),
-    95 + (b % 500),
-    102 + (b % 500),
-    101 + (b % 500),
-    50000 + (b * 100),
-    5000000,
-    1000,
-    25000,
-    50
-  ]);
+  const sym = "STK_" + b;
+  for (let d = 0; d < 40; d++) {
+    sandbox.bulk100kRows.push([
+      "2026-08-" + (d < 10 ? "0" + d : d),
+      sym,
+      "EQ",
+      100 + (b % 100),
+      105 + (b % 100),
+      95 + (b % 100),
+      102 + (b % 100),
+      101 + (b % 100),
+      50000 + (b * 10),
+      5000000,
+      1000,
+      25000,
+      50
+    ]);
+  }
 }
-let bulkMergePassed = true;
-try {
-  const bulkMerged = vm.runInContext('mergeAndDeduplicateDailyData(bulk2800Rows, [])', sandbox);
-  bulkMergePassed = bulkMerged.length === 2800;
-} catch (e) {
-  bulkMergePassed = false;
-}
-assert(bulkMergePassed, "Engine processes 2,800+ NSE stock records with mixed Date objects without exceptions");
+
+const perfStart = Date.now();
+const bulkMerged = vm.runInContext('mergeAndDeduplicateDailyData(bulk100kRows, [])', sandbox);
+const perfTime = Date.now() - perfStart;
+
+// Check stage property resumption
+scriptProperties["PIPELINE_LAST_STAGE"] = "STAGE_2_COMPLETE";
+const resStage = vm.runInContext('FullRefresh(false)', sandbox);
+
+assert(bulkMerged.length === 112000 && perfTime < 5000 && resStage && resStage.totalTimeMs > 0, "Engine processes 112,000+ records in <5s and resumes pipeline from stage checkpoints");
 
 console.log("=================================================");
 console.log(`Test Suite Complete: ${passedTests} / ${totalTests} Passed.`);

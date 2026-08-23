@@ -5,6 +5,7 @@
 
 /**
  * Runs historical backtesting across Strategies A-E without look-ahead bias.
+ * Pre-indexes price matrices and signal dates into memory maps for O(1) bar lookups.
  */
 function runBacktestEngine(strategyName, startDateStr, endDateStr) {
   var config = getConfig();
@@ -17,7 +18,6 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
   var holdingPeriod = safeNumber(settings["BACKTEST_HOLDING_DAYS"], 10);
   var stopLossPct = safeNumber(settings["BACKTEST_STOP_LOSS_PCT"], 5.0);
   var targetPct = safeNumber(settings["BACKTEST_TARGET_PCT"], 15.0);
-  var posSize = safeNumber(settings["BACKTEST_POSITION_SIZE"], 100000);
 
   logSystem("INFO", "Backtest", "Executing backtest for Strategy: " + strategyName + " (" + startDateStr + " to " + endDateStr + ")...", null);
 
@@ -31,12 +31,16 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
     histLogs = readBatchData(config.SHEETS.HISTORICAL_LOG);
   }
 
-  // Group daily prices by Symbol
+  // 1. Index daily price data O(N) into O(1) hash maps
   var stockPriceMap = {};
+  var dateMap = {};
+  var dateList = [];
+
   for (var i = 0; i < rawHistory.length; i++) {
     var r = rawHistory[i];
     var sym = r[1];
     var dKey = formatDateKey(r[0]);
+
     if (!stockPriceMap[sym]) stockPriceMap[sym] = {};
     stockPriceMap[sym][dKey] = {
       open: safeNumber(r[3], 0),
@@ -44,36 +48,40 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
       low: safeNumber(r[5], 0),
       close: safeNumber(r[6], 0)
     };
-  }
 
-  // Get chronological unique trading dates
-  var dateList = [];
-  var dateMap = {};
-  for (var d = 0; d < rawHistory.length; d++) {
-    var dt = formatDateKey(rawHistory[d][0]);
-    if (!dateMap[dt] && dt >= startDateStr && dt <= endDateStr) {
-      dateMap[dt] = true;
-      dateList.push(dt);
+    if (!dateMap[dKey]) {
+      dateMap[dKey] = true;
+      if (dKey >= startDateStr && dKey <= endDateStr) {
+        dateList.push(dKey);
+      }
     }
   }
-  dateList.sort();
+
+  // Fast direct date sorting
+  dateList.sort(function(a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
+
+  // Index date positions for O(1) index retrieval
+  var dateIndexMap = {};
+  for (var idx = 0; idx < dateList.length; idx++) {
+    dateIndexMap[dateList[idx]] = idx;
+  }
 
   var tradeLogs = [];
   var tradeIdCounter = 1;
+  var sellerThreshold = settings["SELLER_THRESHOLD"] || 40000;
 
-  // Process historical signal triggers
+  // 2. Fast single-pass historical log processing
   for (var h = 0; h < histLogs.length; h++) {
     var log = histLogs[h];
     var sigDate = formatDateKey(log[0]);
+    if (sigDate < startDateStr || sigDate > endDateStr) continue;
+
     var symbol = log[1];
-    var entrySignalPrice = safeNumber(log[2], 0);
     var rvol = safeNumber(log[5], 0);
     var delPct = safeNumber(log[7], 0);
     var seller20D = safeNumber(log[9], 0);
     var secStage = log[12];
     var bmScore = safeNumber(log[15], 0);
-
-    if (sigDate < startDateStr || sigDate > endDateStr) continue;
 
     var isSignalTriggered = false;
 
@@ -82,7 +90,7 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
     } else if (strategyName.indexOf("High Delivery") !== -1 || strategyName.indexOf("Strategy B") !== -1) {
       isSignalTriggered = delPct >= 60.0 && rvol >= 1.5;
     } else if (strategyName.indexOf("Low Seller") !== -1 || strategyName.indexOf("Strategy C") !== -1) {
-      isSignalTriggered = seller20D < (settings["SELLER_THRESHOLD"] || 40000);
+      isSignalTriggered = seller20D < sellerThreshold;
     } else if (strategyName.indexOf("Big Money") !== -1 || strategyName.indexOf("Strategy D") !== -1) {
       isSignalTriggered = bmScore >= 75;
     } else if (strategyName.indexOf("Sector Rotation") !== -1 || strategyName.indexOf("Strategy E") !== -1) {
@@ -94,8 +102,8 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
     if (!isSignalTriggered) continue;
 
     // Strict No Look-Ahead Bias: Entry happens at Next Day's OPEN price
-    var sigDateIdx = dateList.indexOf(sigDate);
-    if (sigDateIdx === -1 || sigDateIdx + 1 >= dateList.length) continue;
+    var sigDateIdx = dateIndexMap[sigDate];
+    if (sigDateIdx === undefined || sigDateIdx + 1 >= dateList.length) continue;
 
     var entryDate = dateList[sigDateIdx + 1];
     var prices = stockPriceMap[symbol] || {};
@@ -104,13 +112,13 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
 
     var entryPrice = entryData.open;
     var currentHoldDays = 0;
-    var maxFavExcursion = 0; // MFE %
-    var maxAdvExcursion = 0; // MAE %
+    var maxFavExcursion = 0;
+    var maxAdvExcursion = 0;
     var exitPrice = entryPrice;
     var exitDate = entryDate;
     var outcome = "OPEN";
 
-    // Simulate trade progression over holding period
+    // Simulate trade progression
     for (var k = sigDateIdx + 1; k < dateList.length && currentHoldDays < holdingPeriod; k++) {
       var barDate = dateList[k];
       var barPrice = prices[barDate];
@@ -125,14 +133,12 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
       if (barHighPct > maxFavExcursion) maxFavExcursion = barHighPct;
       if (barLowPct < maxAdvExcursion) maxAdvExcursion = barLowPct;
 
-      // Stop Loss Check
       if (barLowPct <= -stopLossPct) {
         exitPrice = entryPrice * (1 - (stopLossPct / 100));
         outcome = "STOP LOSS";
         break;
       }
 
-      // Target Profit Check
       if (barHighPct >= targetPct) {
         exitPrice = entryPrice * (1 + (targetPct / 100));
         outcome = "TARGET";
@@ -167,7 +173,7 @@ function runBacktestEngine(strategyName, startDateStr, endDateStr) {
     tradeLogs.push(tradeRow);
   }
 
-  // Calculate Summary Statistics
+  // Summary Statistics
   var totalTrades = tradeLogs.length;
   var winningTrades = 0;
   var losingTrades = 0;

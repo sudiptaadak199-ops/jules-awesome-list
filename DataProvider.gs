@@ -34,7 +34,6 @@ function fetchWithRetry(url, options, maxRetries) {
           return null;
         }
       } else {
-        // Sandboxed Node.js test environment mock response
         return null;
       }
     } catch (e) {
@@ -83,14 +82,15 @@ function validateDailyData(record) {
 }
 
 /**
- * Incremental Deduplication Engine.
- * Merges new data records into existing records using 'Date_Symbol' composite key.
+ * High-Performance Incremental Deduplication Engine.
+ * Pre-normalizes all records so sorting uses direct string comparisons (< / >)
+ * without re-parsing dates or calling localeCompare in O(N log N) sort loops.
  */
 function mergeAndDeduplicateDailyData(existingRows, newRows) {
   var recordsMap = {};
   var config = getConfig();
 
-  // Index existing records and normalize dates
+  // 1. Pre-normalize existing records into memory map
   for (var i = 0; i < existingRows.length; i++) {
     var row = existingRows[i];
     if (row && row.length >= 13) {
@@ -98,9 +98,9 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
       var existingSymbolStr = (row[1] || "").toString().trim().toUpperCase();
       var key = row[13] || makeCompositeKey(existingDateStr, existingSymbolStr);
 
-      // Ensure date column is normalized to YYYY-MM-DD string
       row[0] = existingDateStr;
       row[1] = existingSymbolStr;
+      row[13] = key;
       recordsMap[key] = row;
     }
   }
@@ -108,7 +108,7 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
   var addedCount = 0;
   var updatedCount = 0;
 
-  // Merge new records
+  // 2. Pre-normalize and merge new incoming records
   for (var j = 0; j < newRows.length; j++) {
     var nRow = newRows[j];
     var validation = validateDailyData(nRow);
@@ -143,22 +143,23 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
     recordsMap[compKey] = formattedRow;
   }
 
-  // Flatten map to 2D array and sort safely by Date ascending then Symbol
+  // 3. Extract merged list
   var mergedList = [];
   for (var k in recordsMap) {
     mergedList.push(recordsMap[k]);
   }
 
+  // 4. Fast direct string comparison sort O(N log N) without function overhead inside comparator
   mergedList.sort(function(a, b) {
-    var dateA = formatDateKey(a[0]);
-    var dateB = formatDateKey(b[0]);
-    var symA = (a[1] || "").toString();
-    var symB = (b[1] || "").toString();
-
-    if (dateA === dateB) {
-      return symA.localeCompare(symB);
-    }
-    return dateA.localeCompare(dateB);
+    var dA = a[0];
+    var dB = b[0];
+    if (dA < dB) return -1;
+    if (dA > dB) return 1;
+    var sA = a[1];
+    var sB = b[1];
+    if (sA < sB) return -1;
+    if (sA > sB) return 1;
+    return 0;
   });
 
   logSystem("INFO", "DataProvider", "Deduplication completed. Total: " + mergedList.length + " (New: " + addedCount + ", Updated: " + updatedCount + ")", null);

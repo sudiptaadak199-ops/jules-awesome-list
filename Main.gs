@@ -1,5 +1,5 @@
 /**
- * Main.gs - Master Orchestrator, Self-Healing Initialization & Automated Triggers
+ * Main.gs - Master Orchestrator, Stage-Based Resumable Execution & Execution Metrics
  * Author: Quantitative Trading System Architect
  */
 
@@ -18,7 +18,7 @@ function onOpen() {
         .addItem("📺 Update Dashboard", "UpdateDashboard")
         .addItem("🧪 Run Backtest", "RunBacktest")
         .addSeparator()
-        .addItem("🔄 Full Refresh", "FullRefresh")
+        .addItem("🔄 Full Refresh (Resumable Pipeline)", "FullRefresh")
         .addItem("🔍 Validate Data", "ValidateData")
         .addItem("📋 View System Logs", "ViewSystemLogs")
         .addItem("🛠️ Repair Sheets", "RepairSheets")
@@ -34,8 +34,6 @@ function onOpen() {
 
 /**
  * Self-healing project initialization engine.
- * Automatically creates all 12 required sheets, populates default headers and settings,
- * and builds initial master stock universe.
  */
 function InitializeProject() {
   var config = getConfig();
@@ -58,7 +56,6 @@ function InitializeProject() {
       logSystem("INFO", "Main", "Created missing sheet tab: " + sName, null);
     }
 
-    // Repair Headers if missing
     var headerDef = config.HEADERS[key];
     if (headerDef && sheet.getLastRow() === 0) {
       sheet.getRange(1, 1, 1, headerDef.length).setValues([headerDef]);
@@ -67,19 +64,16 @@ function InitializeProject() {
     }
   }
 
-  // Populate Default Settings if empty
   var setSheet = ss.getSheetByName(config.SHEETS.SETTINGS);
   if (setSheet && setSheet.getLastRow() <= 1) {
     writeBatchData(config.SHEETS.SETTINGS, 2, 1, config.DEFAULT_SETTINGS, false);
   }
 
-  // Populate Default Master Stocks if empty
   var masterSheet = ss.getSheetByName(config.SHEETS.MASTER_STOCKS);
   if (masterSheet && masterSheet.getLastRow() <= 1) {
     writeBatchData(config.SHEETS.MASTER_STOCKS, 2, 1, config.DEFAULT_MASTER_STOCKS, false);
   }
 
-  // Remove default 'Sheet1' if present
   var defaultSheet1 = ss.getSheetByName("Sheet1");
   if (defaultSheet1 && ss.getSheets().length > 1) {
     try { ss.deleteSheet(defaultSheet1); } catch(e) {}
@@ -91,24 +85,116 @@ function InitializeProject() {
 }
 
 /**
- * Menu Item Wrapper: Ingestion of NSE Data
+ * Resumable Stage-Based Full Refresh Pipeline with Performance Timing Metrics.
+ * Tracks stage checkpoints via PropertiesService to handle 2,800+ stock scalability.
+ */
+function FullRefresh(forceFromStage1) {
+  var startTime = new Date().getTime();
+  var props = null;
+  if (typeof PropertiesService !== "undefined" && PropertiesService.getScriptProperties) {
+    props = PropertiesService.getScriptProperties();
+  }
+
+  if (forceFromStage1 && props) {
+    props.deleteProperty("PIPELINE_LAST_STAGE");
+  }
+
+  var currentStage = props ? (props.getProperty("PIPELINE_LAST_STAGE") || "START") : "START";
+  logSystem("INFO", "Main", "Starting Full Refresh Pipeline. Current Checkpoint Stage: " + currentStage, null);
+
+  var tIngest = 0, tCalc = 0, tSector = 0, tSignal = 0, tDash = 0;
+  var recordsProcessed = 0;
+  var stocksProcessed = 0;
+
+  try {
+    // Stage 1: System Initialization & Data Ingestion
+    if (currentStage === "START" || currentStage === "STAGE_1_COMPLETE") {
+      var s1 = new Date().getTime();
+      InitializeProject();
+      recordsProcessed = updateNSEDataInSheet();
+      updateAllFIIData();
+      tIngest = new Date().getTime() - s1;
+
+      if (props) props.setProperty("PIPELINE_LAST_STAGE", "STAGE_1_COMPLETE");
+      currentStage = "STAGE_1_COMPLETE";
+    }
+
+    // Stage 2: Indicator Calculations Engine
+    if (currentStage === "STAGE_1_COMPLETE" || currentStage === "STAGE_2_COMPLETE") {
+      var s2 = new Date().getTime();
+      var calcRes = calculateAllIndicators();
+      stocksProcessed = calcRes.length;
+      tCalc = new Date().getTime() - s2;
+
+      if (props) props.setProperty("PIPELINE_LAST_STAGE", "STAGE_2_COMPLETE");
+      currentStage = "STAGE_2_COMPLETE";
+    }
+
+    // Stage 3: Sector Rotation Aggregation
+    if (currentStage === "STAGE_2_COMPLETE" || currentStage === "STAGE_3_COMPLETE") {
+      var s3 = new Date().getTime();
+      calculateSectorRotation();
+      tSector = new Date().getTime() - s3;
+
+      if (props) props.setProperty("PIPELINE_LAST_STAGE", "STAGE_3_COMPLETE");
+      currentStage = "STAGE_3_COMPLETE";
+    }
+
+    // Stage 4: Signal Generation & Snapshot Logging
+    if (currentStage === "STAGE_3_COMPLETE" || currentStage === "STAGE_4_COMPLETE") {
+      var s4 = new Date().getTime();
+      generateSignalsAndSnapshot();
+      tSignal = new Date().getTime() - s4;
+
+      if (props) props.setProperty("PIPELINE_LAST_STAGE", "STAGE_4_COMPLETE");
+      currentStage = "STAGE_4_COMPLETE";
+    }
+
+    // Stage 5: Trader-Centric Dashboard UI Rendering
+    if (currentStage === "STAGE_4_COMPLETE") {
+      var s5 = new Date().getTime();
+      renderDashboard();
+      tDash = new Date().getTime() - s5;
+
+      if (props) props.deleteProperty("PIPELINE_LAST_STAGE");
+    }
+
+    var totalTime = new Date().getTime() - startTime;
+
+    // Performance Timing Metrics Output
+    var perfSummary = {
+      totalTimeMs: totalTime,
+      ingestTimeMs: tIngest,
+      calcTimeMs: tCalc,
+      sectorTimeMs: tSector,
+      signalTimeMs: tSignal,
+      dashTimeMs: tDash,
+      recordsProcessed: recordsProcessed,
+      stocksProcessed: stocksProcessed
+    };
+
+    logSystem("INFO", "Main", "Full Refresh Pipeline Completed Successfully in " + (totalTime / 1000).toFixed(2) + "s", perfSummary);
+    return perfSummary;
+
+  } catch (e) {
+    logSystem("ERROR", "Main", "Full Refresh Pipeline failed at stage (" + currentStage + "): " + e.message, e.stack);
+    throw e;
+  }
+}
+
+/**
+ * Individual Menu Command Wrappers
  */
 function UpdateNSEData() {
   var count = updateNSEDataInSheet();
   logSystem("INFO", "Main", "Updated " + count + " NSE daily records.", null);
 }
 
-/**
- * Menu Item Wrapper: Ingestion of FII Data
- */
 function UpdateFIIData() {
   var res = updateAllFIIData();
   logSystem("INFO", "Main", "Updated FII data. Market records: " + res.marketRecords + ", Holdings: " + res.stockHoldings, null);
 }
 
-/**
- * Menu Item Wrapper: Indicator Calculations
- */
 function CalculateIndicators() {
   var results = calculateAllIndicators();
   calculateSectorRotation();
@@ -116,37 +202,14 @@ function CalculateIndicators() {
   logSystem("INFO", "Main", "Calculated indicators for " + results.length + " stocks.", null);
 }
 
-/**
- * Menu Item Wrapper: Dashboard Rendering
- */
 function UpdateDashboard() {
   renderDashboard();
 }
 
-/**
- * Menu Item Wrapper: Quantitative Backtesting
- */
 function RunBacktest() {
   runBacktestEngine("Strategy D: Potential Big Money Entry", null, null);
 }
 
-/**
- * Menu Item Wrapper: Full System Refresh Pipeline
- */
-function FullRefresh() {
-  logSystem("INFO", "Main", "Starting Full Refresh Pipeline...", null);
-  InitializeProject();
-  UpdateNSEData();
-  UpdateFIIData();
-  CalculateIndicators();
-  UpdateDashboard();
-  generateSignalsAndSnapshot();
-  logSystem("INFO", "Main", "Full Refresh Pipeline finished successfully.", null);
-}
-
-/**
- * Menu Item Wrapper: Data Quality Validation
- */
 function ValidateData() {
   var config = getConfig();
   var rawData = readBatchData(config.SHEETS.RAW_DAILY);
@@ -162,9 +225,6 @@ function ValidateData() {
   logSystem("INFO", "Main", "Data Validation finished. Valid: " + validCount + ", Invalid: " + invalidCount, null);
 }
 
-/**
- * Menu Item Wrapper: View System Logs
- */
 function ViewSystemLogs() {
   if (typeof SpreadsheetApp !== "undefined" && SpreadsheetApp.getActiveSpreadsheet) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -173,18 +233,12 @@ function ViewSystemLogs() {
   }
 }
 
-/**
- * Menu Item Wrapper: Repair Sheets Structure
- */
 function RepairSheets() {
   InitializeProject();
 }
 
-/**
- * Menu Item Wrapper: Start Automated Time-Driven Triggers
- */
 function StartAutoUpdate() {
-  StopAutoUpdate(); // Clear existing triggers first
+  StopAutoUpdate();
   if (typeof ScriptApp !== "undefined" && ScriptApp.newTrigger) {
     ScriptApp.newTrigger("scheduledUpdateData")
       .timeBased()
@@ -194,9 +248,6 @@ function StartAutoUpdate() {
   }
 }
 
-/**
- * Menu Item Wrapper: Stop Automated Time-Driven Triggers
- */
 function StopAutoUpdate() {
   if (typeof ScriptApp !== "undefined" && ScriptApp.getProjectTriggers) {
     var triggers = ScriptApp.getProjectTriggers();
@@ -209,13 +260,10 @@ function StopAutoUpdate() {
   }
 }
 
-/**
- * Headless Execution Entry Point for Automated Time-Driven Triggers
- */
 function scheduledUpdateData() {
   logSystem("INFO", "Main", "Executing scheduled automated update...", null);
   try {
-    FullRefresh();
+    FullRefresh(false);
   } catch (e) {
     logSystem("ERROR", "Main", "Scheduled update failed: " + e.message, e.stack);
   }

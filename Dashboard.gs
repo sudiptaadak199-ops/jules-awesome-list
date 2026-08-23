@@ -108,8 +108,9 @@ function renderDashboard() {
     if (dashSheet) {
       dashSheet.clearContents();
 
+      // Top Header & System Overview (Exactly 8 columns wide across all rows)
       var headerData = [
-        ["NSE VOLUME, DELIVERY & BIG MONEY INTELLIGENCE DASHBOARD", "", "", "", "", "", "", "", ""],
+        ["NSE VOLUME, DELIVERY & BIG MONEY INTELLIGENCE DASHBOARD", "", "", "", "", "", "", ""],
         ["Data Source:", settings["DATA_SOURCE_NAME"] || "NSE Official Archives", "Last Updated:", new Date().toLocaleString(), "Tracked Stocks:", totalStocks, "Market Breadth:", marketBreadthPct + "%"],
         ["RVOL >= 2x:", rvol2Count, "RVOL >= 5x:", rvol5Count, "20x+ Volume Stocks:", rvol20Count, "Big Money Candidates:", bigMoneyCount]
       ];

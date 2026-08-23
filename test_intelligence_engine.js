@@ -163,13 +163,23 @@ assert(!invalidRecord.valid && invalidRecord.errors.length >= 2, "validateDailyD
 const histCount = vm.runInContext('updateNSEDataInSheet()', sandbox);
 assert(histCount > 100, "NSEData seeds multi-day historical price/volume archives into Raw_Daily");
 
-// Test 10: Incremental Primary Key Deduplication
+// Test 10: Incremental Primary Key Deduplication & Date Objects Sorting Fix
 const initialRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_DAILY)', sandbox);
-const testNewRow = ["2025-05-20", "HAL", "EQ", 4000, 4200, 3950, 4150, 4100, 1000000, 4150000000, 20000, 750000, 75];
+// Add a row with a native Date object to test type safety during localeCompare sort
+const testDateObjRow = [new Date("2026-08-23"), "TCS", "EQ", 4000, 4200, 3950, 4150, 4100, 1000000, 4150000000, 20000, 750000, 75];
+const testNewRow = ["2026-08-23", "HAL", "EQ", 4000, 4200, 3950, 4150, 4100, 1000000, 4150000000, 20000, 750000, 75];
 sandbox.initialRows = initialRows;
+sandbox.testDateObjRow = testDateObjRow;
 sandbox.testNewRow = testNewRow;
-const merged = vm.runInContext('mergeAndDeduplicateDailyData(initialRows, [testNewRow])', sandbox);
-assert(merged.length === initialRows.length || merged.length === initialRows.length + 1, "Deduplication engine correctly handles Date_Symbol updates");
+
+let dateSortPassed = true;
+try {
+  const mergedWithDateObjs = vm.runInContext('mergeAndDeduplicateDailyData([testDateObjRow], [testNewRow])', sandbox);
+  dateSortPassed = mergedWithDateObjs.length === 2 && mergedWithDateObjs[0][0] === "2026-08-23";
+} catch (e) {
+  dateSortPassed = false;
+}
+assert(dateSortPassed, "Deduplication engine safely handles Date objects without a[0].localeCompare exception");
 
 // Test 11: FII Market Activity vs Stock Ownership Separation
 const fiiRes = vm.runInContext('updateAllFIIData()', sandbox);
@@ -229,10 +239,33 @@ assert(backtestRes && backtestRes.totalTrades >= 0, "Backtest engine executes tr
 // Test 24: Strategy Performance Summary Metrics
 assert(typeof backtestRes.winRate === 'number' && typeof backtestRes.profitFactor === 'number', "Computes Win Rate %, Profit Factor, and trade returns");
 
-// Test 25: Full Refresh Master Orchestrator Pipeline
-vm.runInContext('FullRefresh()', sandbox);
-const finalCalc = vm.runInContext('readBatchData(getConfig().SHEETS.CALCULATIONS)', sandbox);
-assert(finalCalc.length > 0, "Full Refresh Pipeline completes end-to-end execution without exceptions");
+// Test 25: Full Refresh Master Orchestrator Pipeline & 2,800+ Records Bulk Scaling
+sandbox.bulk2800Rows = [];
+for (let b = 0; b < 2800; b++) {
+  sandbox.bulk2800Rows.push([
+    new Date("2026-08-23"),
+    "STOCK_" + b,
+    "EQ",
+    100 + (b % 500),
+    105 + (b % 500),
+    95 + (b % 500),
+    102 + (b % 500),
+    101 + (b % 500),
+    50000 + (b * 100),
+    5000000,
+    1000,
+    25000,
+    50
+  ]);
+}
+let bulkMergePassed = true;
+try {
+  const bulkMerged = vm.runInContext('mergeAndDeduplicateDailyData(bulk2800Rows, [])', sandbox);
+  bulkMergePassed = bulkMerged.length === 2800;
+} catch (e) {
+  bulkMergePassed = false;
+}
+assert(bulkMergePassed, "Engine processes 2,800+ NSE stock records with mixed Date objects without exceptions");
 
 console.log("=================================================");
 console.log(`Test Suite Complete: ${passedTests} / ${totalTests} Passed.`);

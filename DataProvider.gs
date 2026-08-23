@@ -90,11 +90,17 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
   var recordsMap = {};
   var config = getConfig();
 
-  // Index existing records
+  // Index existing records and normalize dates
   for (var i = 0; i < existingRows.length; i++) {
     var row = existingRows[i];
     if (row && row.length >= 13) {
-      var key = row[13] || makeCompositeKey(row[0], row[1]);
+      var existingDateStr = formatDateKey(row[0]);
+      var existingSymbolStr = (row[1] || "").toString().trim().toUpperCase();
+      var key = row[13] || makeCompositeKey(existingDateStr, existingSymbolStr);
+
+      // Ensure date column is normalized to YYYY-MM-DD string
+      row[0] = existingDateStr;
+      row[1] = existingSymbolStr;
       recordsMap[key] = row;
     }
   }
@@ -109,7 +115,7 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
     if (!validation.valid) continue;
 
     var dateStr = formatDateKey(nRow[0]);
-    var symbolStr = (nRow[1] || "").toString().toUpperCase();
+    var symbolStr = (nRow[1] || "").toString().trim().toUpperCase();
     var compKey = makeCompositeKey(dateStr, symbolStr);
 
     var formattedRow = [
@@ -137,17 +143,22 @@ function mergeAndDeduplicateDailyData(existingRows, newRows) {
     recordsMap[compKey] = formattedRow;
   }
 
-  // Flatten map to 2D array and sort by Date ascending then Symbol
+  // Flatten map to 2D array and sort safely by Date ascending then Symbol
   var mergedList = [];
   for (var k in recordsMap) {
     mergedList.push(recordsMap[k]);
   }
 
   mergedList.sort(function(a, b) {
-    if (a[0] === b[0]) {
-      return a[1].localeCompare(b[1]);
+    var dateA = formatDateKey(a[0]);
+    var dateB = formatDateKey(b[0]);
+    var symA = (a[1] || "").toString();
+    var symB = (b[1] || "").toString();
+
+    if (dateA === dateB) {
+      return symA.localeCompare(symB);
     }
-    return a[0].localeCompare(b[0]);
+    return dateA.localeCompare(dateB);
   });
 
   logSystem("INFO", "DataProvider", "Deduplication completed. Total: " + mergedList.length + " (New: " + addedCount + ", Updated: " + updatedCount + ")", null);

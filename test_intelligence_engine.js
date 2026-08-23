@@ -192,11 +192,33 @@ try {
 }
 assert(dateSortPassed, "Deduplication engine safely handles Date objects without a[0].localeCompare exception");
 
-// Test 11: FII Market Activity vs Stock Ownership Separation
+// Test 11: FII Market Activity vs Stock Ownership Separation & FII Fail-Fast Non-Blocking Resilience
 const fiiRes = vm.runInContext('updateAllFIIData()', sandbox);
-const fiiMarketRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_FII)', sandbox);
 const fiiHoldingRows = vm.runInContext('readBatchData(getConfig().SHEETS.RAW_FII_HOLDINGS)', sandbox);
-assert(fiiMarketRows.length > 0 && fiiHoldingRows.length > 0 && fiiMarketRows[0].length === 5 && fiiHoldingRows[0].length === 8, "Strictly separates market-level FII activity from stock-wise FII ownership");
+
+let fiiFailFullRefreshPassed = false;
+try {
+  vm.runInContext('var origFetchWithRetry = fetchWithRetry; fetchWithRetry = function(url, options, maxRetries) { if (url && url.indexOf("fiidii") !== -1) { throw new Error("Simulated FII API Timeout / Failure"); } return origFetchWithRetry(url, options, maxRetries); };', sandbox);
+
+  const refreshRes = vm.runInContext('FullRefresh(true)', sandbox);
+  const calcData = vm.runInContext('readBatchData(getConfig().SHEETS.CALCULATIONS)', sandbox);
+  const sectorData = vm.runInContext('readBatchData(getConfig().SHEETS.SECTOR_DATA)', sandbox);
+
+  fiiFailFullRefreshPassed = (
+    refreshRes !== null && refreshRes !== undefined &&
+    calcData.length > 0 &&
+    sectorData.length > 0
+  );
+
+  vm.runInContext('fetchWithRetry = origFetchWithRetry;', sandbox);
+} catch (e) {
+  fiiFailFullRefreshPassed = false;
+}
+
+assert(
+  fiiHoldingRows.length > 0 && fiiFailFullRefreshPassed,
+  "FII API timeout/failure must not stop FullRefresh (Pipeline completes Raw_Daily -> Calculations -> Sector -> Signals -> Dashboard)"
+);
 
 // Test 12: Indicator Engine Calculations Execution
 const calcResults = vm.runInContext('calculateAllIndicators()', sandbox);

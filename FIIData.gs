@@ -2,19 +2,22 @@
  * FIIData.gs - Institutional & Stock-wise FII Ownership Ingestion
  * Author: Quantitative Trading System Architect
  *
- * IMPORTANT ARCHITECTURAL DIRECTIVE:
- * Never confuse market-level aggregate FII activity (Buy/Sell) with stock-wise FII ownership (%).
+ * IMPORTANT ARCHITECTURAL DIRECTIVES:
+ * 1. Never confuse market-level aggregate FII activity (Buy/Sell) with stock-wise FII ownership (%).
+ * 2. FII data ingestion is OPTIONAL enrichment and MUST NEVER block or fail FullRefresh().
  */
 
 /**
- * Ingests Module A: Market-Level FII / FPI Activity from NSE API feed.
- * Stores Aggregate Daily FII Buy, FII Sell, and Net FII flow.
+ * Ingests Module A: Market-Level FII / FPI Activity.
+ * Fail-fast, time-budgeted, non-blocking fetch that preserves existing Raw_FII data on failure.
  */
 function updateFIIMarketActivity() {
+  var fiiStartTime = new Date().getTime();
   var config = getConfig();
   var todayStr = formatDateKey(new Date());
+  var fiiStatus = "UNAVAILABLE";
 
-  logSystem("INFO", "FIIData", "Fetching aggregate market-level FII activity data from NSE API...", null);
+  logSystem("INFO", "FIIData", "FII fetch started", null);
 
   var existingData = readBatchData(config.SHEETS.RAW_FII);
   var fiiMap = {};
@@ -27,75 +30,95 @@ function updateFIIMarketActivity() {
     }
   }
 
-  // Attempt official NSE FII/DII API fetch
   var fiiUrl = (config.ENDPOINTS && config.ENDPOINTS.NSE_FII_ACTIVITY_URL) ?
     config.ENDPOINTS.NSE_FII_ACTIVITY_URL : "https://www.nseindia.com/api/fiidiiTradeReact";
 
-  var jsonResponse = fetchWithRetry(fiiUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "Accept": "application/json",
-      "Referer": "https://www.nseindia.com"
-    }
-  }, 2);
+  var jsonResponse = null;
 
-  var sampleFIIBuy = 8450.50;
-  var sampleFIISell = 7120.20;
+  try {
+    // Fail-fast fetch: 1 single attempt, zero retries, no sleep delays
+    if (typeof fetchWithRetry !== "undefined") {
+      jsonResponse = fetchWithRetry(fiiUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Accept": "application/json",
+          "Referer": "https://www.nseindia.com"
+        }
+      }, 1);
+    }
+  } catch (netErr) {
+    logSystem("WARN", "FIIData", "FII network fetch error (fail-fast triggered): " + netErr.message, null);
+  }
 
   if (jsonResponse) {
     try {
       var parsed = JSON.parse(jsonResponse);
-      if (Array.isArray(parsed)) {
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        var fiiBuy = null;
+        var fiiSell = null;
+
         for (var p = 0; p < parsed.length; p++) {
           var item = parsed[p];
-          if (item.category && item.category.indexOf("FII") !== -1) {
-            sampleFIIBuy = safeNumber(item.buyValue, sampleFIIBuy);
-            sampleFIISell = safeNumber(item.sellValue, sampleFIISell);
+          if (item && item.category && item.category.indexOf("FII") !== -1) {
+            fiiBuy = safeNumber(item.buyValue, null);
+            fiiSell = safeNumber(item.sellValue, null);
             break;
           }
         }
+
+        if (fiiBuy !== null && fiiSell !== null) {
+          fiiMap[todayStr] = [
+            todayStr,
+            fiiBuy,
+            fiiSell,
+            fiiBuy - fiiSell,
+            "NSE Official FII/DII Feed"
+          ];
+          fiiStatus = "SUCCESS";
+        } else {
+          fiiStatus = "STALE";
+        }
+      } else {
+        fiiStatus = "STALE";
       }
     } catch (e) {
-      logSystem("WARN", "FIIData", "Unable to parse live JSON FII response: " + e.message, null);
+      logSystem("WARN", "FIIData", "Unable to parse FII JSON feed: " + e.message, null);
+      fiiStatus = "STALE";
     }
+  } else {
+    fiiStatus = Object.keys(fiiMap).length > 0 ? "STALE" : "UNAVAILABLE";
   }
 
-  var sampleNetFII = sampleFIIBuy - sampleFIISell;
-
-  fiiMap[todayStr] = [
-    todayStr,
-    sampleFIIBuy,
-    sampleFIISell,
-    sampleNetFII,
-    "NSE Official FII/DII Feed"
-  ];
-
+  // Preserve existing records if current fetch failed
   var updatedRows = [];
   for (var k in fiiMap) {
     updatedRows.push(fiiMap[k]);
   }
 
-  updatedRows.sort(function(a, b) {
-    return a[0].localeCompare(b[0]);
+  if (updatedRows.length > 0) {
+    updatedRows.sort(function(a, b) {
+      return a[0].localeCompare(b[0]);
+    });
+    writeBatchData(config.SHEETS.RAW_FII, 2, 1, updatedRows, true);
+  }
+
+  var fiiDurationMs = new Date().getTime() - fiiStartTime;
+  logSystem("INFO", "FIIData", "FII fetch completed / timed out. Duration: " + fiiDurationMs + "ms | FII status: " + fiiStatus, {
+    durationMs: fiiDurationMs,
+    fiiStatus: fiiStatus,
+    records: updatedRows.length
   });
 
-  writeBatchData(config.SHEETS.RAW_FII, 2, 1, updatedRows, true);
-  logSystem("INFO", "FIIData", "Market-level Raw_FII updated successfully. Total records: " + updatedRows.length, null);
   return updatedRows.length;
 }
 
 /**
  * Ingests Module B: Stock-Wise FII Ownership / Shareholding.
- * Tracks specific FII holding percentage changes quarter-over-quarter.
- * Rule: Stock-wise FII increase = Current FII % - Previous FII %
- * Note: When stock-wise ownership feeds are unpopulated, fields are marked as "N/A" / 0
- * to prevent fabricating fake stock-specific accumulation.
+ * Non-blocking, un-fabricated stock-wise holdings mapping.
  */
 function updateStockFIIHoldings() {
   var config = getConfig();
   var masterStocks = config.DEFAULT_MASTER_STOCKS;
-
-  logSystem("INFO", "FIIData", "Updating stock-wise FII ownership shareholding records...", null);
 
   var fiiHoldingRows = [];
 
@@ -105,8 +128,8 @@ function updateStockFIIHoldings() {
 
     var row = [
       symbol,
-      "N/A",  // Previous FII % (Unfabricated placeholder)
-      "N/A",  // Current FII % (Unfabricated placeholder)
+      "N/A",  // Previous FII % (Unfabricated)
+      "N/A",  // Current FII % (Unfabricated)
       0,      // Change in FII %
       "Q3 FY24",
       "Q4 FY24",
@@ -118,15 +141,27 @@ function updateStockFIIHoldings() {
   }
 
   writeBatchData(config.SHEETS.RAW_FII_HOLDINGS, 2, 1, fiiHoldingRows, true);
-  logSystem("INFO", "FIIData", "Stock-wise Raw_FII_Holdings updated successfully. Total stocks: " + fiiHoldingRows.length, null);
   return fiiHoldingRows.length;
 }
 
 /**
- * Combined launcher for all FII data ingestion tasks.
+ * Combined launcher for all FII data ingestion tasks with full error isolation.
  */
 function updateAllFIIData() {
-  var countA = updateFIIMarketActivity();
-  var countB = updateStockFIIHoldings();
+  var countA = 0;
+  var countB = 0;
+
+  try {
+    countA = updateFIIMarketActivity();
+  } catch (e) {
+    logSystem("WARN", "FIIData", "Module A FII market activity fetch failed safely: " + e.message, null);
+  }
+
+  try {
+    countB = updateStockFIIHoldings();
+  } catch (e) {
+    logSystem("WARN", "FIIData", "Module B stock FII holdings update failed safely: " + e.message, null);
+  }
+
   return { marketRecords: countA, stockHoldings: countB };
 }

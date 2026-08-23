@@ -6,11 +6,12 @@
 /**
  * Renders the primary Dashboard user interface including Market Overview,
  * 6 Specialized Intelligence Panels, Master Stock Scanner, and System Data Freshness metrics.
- * Uses high-performance single-pass array filters and bulk block writes.
+ * Uses high-performance single-pass array filters, bulk block writes, and embedded volume charts.
  */
 function renderDashboard() {
   var config = getConfig();
   var settings = getSettings();
+  var theme = getUITheme();
 
   logSystem("INFO", "Dashboard", "Rendering primary trading intelligence dashboard...", null);
 
@@ -34,7 +35,7 @@ function renderDashboard() {
   var bigMoneyCount = 0;
   var advancingCount = 0;
 
-  var sellerThreshold = settings["SELLER_THRESHOLD"] || 40000;
+  var sellerThreshold = settings["SELLER_THRESHOLD"] || 5000;
   var ultraExtremeThreshold = settings["RVOL_THRESHOLD_ULTRA_EXTREME"] || 20;
 
   var volume20xRows = [];
@@ -70,38 +71,58 @@ function renderDashboard() {
   var marketBreadthPct = totalStocks > 0 ? Math.round((advancingCount / totalStocks) * 100) : 0;
 
   // 2. Fast direct sorting for panel outputs
+
+  // Panel 1: Highest Delivery Volume Panel
+  // Fields: Symbol, Company, Total Volume, Delivery Volume, Delivery %, Volume vs 20D Avg %, Current Price, Price Change %
   var deliveryFilter = settings["DELIVERY_FILTER_MODE"] || "Top 20";
   var deliveryLimit = deliveryFilter === "Top 10" ? 10 : (deliveryFilter === "Top 50" ? 50 : (deliveryFilter === "All" ? totalStocks : 20));
 
   var deliverySorted = calcData.slice().sort(function(a, b) {
-    return safeNumber(b[13], 0) - safeNumber(a[13], 0);
-  });
-  var panel1Rows = deliverySorted.slice(0, deliveryLimit).map(function(r, idx) {
-    return [idx + 1, r[0], r[3], r[13], r[14], r[6], r[10], r[5], r[16], r[17], r[2]];
+    return safeNumber(b[13], 0) - safeNumber(a[13], 0); // Delivery Qty
   });
 
+  var panel1Rows = deliverySorted.slice(0, deliveryLimit).map(function(r) {
+    var rvolVal = safeNumber(r[10], 1.0);
+    var volVs20DAvgPct = Math.round((rvolVal - 1) * 100 * 100) / 100;
+    return [
+      r[0] || "N/A",                                // Symbol
+      r[1] || "N/A",                                // Company
+      safeNumber(r[6], 0),                         // Total Volume
+      safeNumber(r[13], 0),                        // Delivery Volume
+      safeNumber(r[14], 0) + "%",                  // Delivery %
+      (volVs20DAvgPct >= 0 ? "+" : "") + volVs20DAvgPct + "%", // Volume vs 20D Avg %
+      safeNumber(r[3], 0),                         // Current Price
+      safeNumber(r[5], 0) + "%"                    // Price Change %
+    ];
+  });
+
+  // Panel 2: 20x+ Volume Scanner
   volume20xRows.sort(function(a, b) { return b[10] - a[10]; });
   var panel2Rows = volume20xRows.map(function(r, idx) {
-    return [idx + 1, r[0], r[1], r[3], r[5], r[6], r[8], r[10], r[13], r[14], r[2], r[31]];
+    return [idx + 1, r[0] || "N/A", r[1] || "N/A", r[3], r[5] + "%", r[6], r[8], r[10], r[13], r[14] + "%", r[2] || "N/A", r[31]];
   });
 
+  // Panel 3: Low Selling Pressure Scanner (20D Selling Pressure Proxy < 5,000, Max 20 stocks)
   lowSellerRows.sort(function(a, b) { return a[26] - b[26]; });
-  var panel3Rows = lowSellerRows.map(function(r) {
-    return [r[0], r[3], r[26], r[6], r[8], r[14], r[5], r[2], r[31]];
+  var panel3Rows = lowSellerRows.slice(0, 20).map(function(r) {
+    return [r[0] || "N/A", r[3], r[26], r[6], r[8], r[14] + "%", r[5] + "%", r[2] || "N/A", r[31]];
   });
 
+  // Panel 4: FII Activity
   var latestFII = fiiMarketData.length > 0 ? fiiMarketData[fiiMarketData.length - 1] : ["N/A", 0, 0, 0];
 
+  // Panel 5: Big Money Entry
   bigMoneyRows.sort(function(a, b) { return b[32] - a[32]; });
   var panel5Rows = bigMoneyRows.map(function(r, idx) {
-    return [idx + 1, r[0], r[1], r[2], r[3], r[10], r[12], r[14], r[26], r[32], r[33]];
+    return [idx + 1, r[0] || "N/A", r[1] || "N/A", r[2] || "N/A", r[3], r[10], r[12], r[14] + "%", r[26], r[32], r[33]];
   });
 
+  // Panel 6: Sector Rotation
   var sectorPanelRows = sectorData.slice(0, 10).map(function(s) {
-    return [s[0], s[11], s[8], s[4], s[5], s[6], s[10]];
+    return [s[0] || "N/A", s[11], s[8] + "%", s[4] + "%", s[5], s[6], s[10]];
   });
 
-  // 3. High-Performance Bulk Range Writes
+  // 3. High-Performance Bulk Range Writes & Visual Styling
   if (typeof SpreadsheetApp !== "undefined" && SpreadsheetApp.getActiveSpreadsheet) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var dashSheet = ss.getSheetByName(config.SHEETS.DASHBOARD);
@@ -114,27 +135,66 @@ function renderDashboard() {
         ["Data Source:", settings["DATA_SOURCE_NAME"] || "NSE Official Archives", "Last Updated:", new Date().toLocaleString(), "Tracked Stocks:", totalStocks, "Market Breadth:", marketBreadthPct + "%"],
         ["RVOL >= 2x:", rvol2Count, "RVOL >= 5x:", rvol5Count, "20x+ Volume Stocks:", rvol20Count, "Big Money Candidates:", bigMoneyCount]
       ];
-      dashSheet.getRange(1, 1, headerData.length, headerData[0].length).setValues(headerData);
+      var headerRange = dashSheet.getRange(1, 1, headerData.length, headerData[0].length);
+      headerRange.setValues(headerData);
+
+      try {
+        dashSheet.getRange(1, 1, 1, 8).setBackground(theme.HEADER_BG).setFontColor(theme.HEADER_FG).setFontWeight("bold");
+        dashSheet.setFrozenRows(3);
+      } catch (e) {}
 
       var currentRow = 5;
 
       // Panel 1: Highest Delivery Volume
       dashSheet.getRange(currentRow, 1).setValue("🔥 HIGHEST DELIVERY VOLUME STOCKS (" + deliveryFilter + ")");
+      try { dashSheet.getRange(currentRow, 1, 1, 8).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
-      var p1Headers = [["Rank", "Symbol", "Price", "Delivery Qty", "Delivery %", "Total Vol", "RVOL", "Change %", "20D Avg Del", "Del Accel", "Sector"]];
+
+      var p1Headers = [["Symbol", "Company", "Total Volume", "Delivery Volume", "Delivery %", "Volume vs 20D Avg %", "Current Price", "Price Change %"]];
+      var p1HeaderRow = currentRow;
       dashSheet.getRange(currentRow, 1, 1, p1Headers[0].length).setValues(p1Headers);
       currentRow++;
+
       if (panel1Rows.length > 0) {
         dashSheet.getRange(currentRow, 1, panel1Rows.length, panel1Rows[0].length).setValues(panel1Rows);
         currentRow += panel1Rows.length + 2;
       }
 
+      // Add Volume + Delivery Column Chart Visualization
+      try {
+        if (typeof dashSheet.getCharts === "function" && typeof Charts !== "undefined") {
+          var existingCharts = dashSheet.getCharts();
+          for (var c = 0; c < existingCharts.length; c++) {
+            dashSheet.removeChart(existingCharts[c]);
+          }
+          if (panel1Rows.length > 0) {
+            var chartRange = dashSheet.getRange(p1HeaderRow, 1, Math.min(10, panel1Rows.length) + 1, 4);
+            var chart = dashSheet.newChart()
+              .setChartType(Charts.ChartType.COLUMN)
+              .addRange(chartRange)
+              .setPosition(currentRow, 1, 0, 0)
+              .setOption("title", "📊 Top 10 Delivery Volume vs Total Volume Comparison")
+              .setOption("colors", ["#007BFF", "#28A745"])
+              .setOption("width", 750)
+              .setOption("height", 320)
+              .build();
+            dashSheet.insertChart(chart);
+            currentRow += 18; // Leave space below embedded chart
+          }
+        }
+      } catch (chartErr) {
+        logSystem("WARN", "Dashboard", "Chart insertion skipped: " + chartErr.message, null);
+      }
+
       // Panel 2: 20x+ Volume Scanner
       dashSheet.getRange(currentRow, 1).setValue("🚀 20×+ VOLUME EXPANSION SCANNER");
+      try { dashSheet.getRange(currentRow, 1, 1, 12).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       var p2Headers = [["Rank", "Symbol", "Company", "Price", "Change %", "Volume", "Avg 20D Vol", "RVOL", "Delivery Qty", "Delivery %", "Sector", "New Money Score"]];
       dashSheet.getRange(currentRow, 1, 1, p2Headers[0].length).setValues(p2Headers);
       currentRow++;
+
       if (panel2Rows.length > 0) {
         dashSheet.getRange(currentRow, 1, panel2Rows.length, panel2Rows[0].length).setValues(panel2Rows);
         currentRow += panel2Rows.length + 2;
@@ -143,29 +203,40 @@ function renderDashboard() {
         currentRow += 2;
       }
 
-      // Panel 3: Low Selling Pressure
+      // Panel 3: Low Selling Pressure Scanner (< 5,000 threshold, Max 20 stocks)
       dashSheet.getRange(currentRow, 1).setValue("👀 LOW SELLING PRESSURE STOCKS (20D Avg Selling Pressure Proxy < " + sellerThreshold.toLocaleString() + ")");
+      try { dashSheet.getRange(currentRow, 1, 1, 9).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       var p3Headers = [["Symbol", "Price", "20D Avg Selling Pressure Proxy", "Volume", "Avg 20D Vol", "Delivery %", "Change %", "Sector", "New Money Score"]];
       dashSheet.getRange(currentRow, 1, 1, p3Headers[0].length).setValues(p3Headers);
       currentRow++;
+
       if (panel3Rows.length > 0) {
         dashSheet.getRange(currentRow, 1, panel3Rows.length, panel3Rows[0].length).setValues(panel3Rows);
         currentRow += panel3Rows.length + 2;
+      } else {
+        dashSheet.getRange(currentRow, 1).setValue("No stocks currently below " + sellerThreshold.toLocaleString() + " selling pressure proxy.");
+        currentRow += 2;
       }
 
       // Panel 4: FII Activity
       dashSheet.getRange(currentRow, 1).setValue("🏦 FII / INSTITUTIONAL ACTIVITY MONITOR");
+      try { dashSheet.getRange(currentRow, 1, 1, 8).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       dashSheet.getRange(currentRow, 1).setValue("Market Activity Date: " + latestFII[0] + " | Buy: ₹" + latestFII[1] + " Cr | Sell: ₹" + latestFII[2] + " Cr | Net FII: ₹" + latestFII[3] + " Cr (Stock-wise holdings available in Raw_FII_Holdings)");
       currentRow += 2;
 
       // Panel 5: Big Money Entry
       dashSheet.getRange(currentRow, 1).setValue("💰 POTENTIAL BIG MONEY INITIAL ENTRY");
+      try { dashSheet.getRange(currentRow, 1, 1, 11).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       var p5Headers = [["Rank", "Symbol", "Company", "Sector", "Price", "RVOL", "Vol Accel", "Delivery %", "20D Selling Pressure Proxy", "Big Money Score", "Signal Status"]];
       dashSheet.getRange(currentRow, 1, 1, p5Headers[0].length).setValues(p5Headers);
       currentRow++;
+
       if (panel5Rows.length > 0) {
         dashSheet.getRange(currentRow, 1, panel5Rows.length, panel5Rows[0].length).setValues(panel5Rows);
         currentRow += panel5Rows.length + 2;
@@ -173,10 +244,13 @@ function renderDashboard() {
 
       // Panel 6: Sector Rotation
       dashSheet.getRange(currentRow, 1).setValue("🔄 SECTOR ROTATION MONITOR");
+      try { dashSheet.getRange(currentRow, 1, 1, 7).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       var p6Headers = [["Sector", "Stage", "Sector RS", "Breadth %", "Avg RVOL", "Vol Accel", "Money Score"]];
       dashSheet.getRange(currentRow, 1, 1, p6Headers[0].length).setValues(p6Headers);
       currentRow++;
+
       if (sectorPanelRows.length > 0) {
         dashSheet.getRange(currentRow, 1, sectorPanelRows.length, sectorPanelRows[0].length).setValues(sectorPanelRows);
         currentRow += sectorPanelRows.length + 2;
@@ -184,10 +258,13 @@ function renderDashboard() {
 
       // Master Stock Scanner Table
       dashSheet.getRange(currentRow, 1).setValue("📊 MASTER STOCK INTELLIGENCE SCANNER (ALL TRACKED STOCKS)");
+      try { dashSheet.getRange(currentRow, 1, 1, 35).setFontWeight("bold").setBackground(theme.CARD_BG).setFontColor("#FFFFFF"); } catch(e) {}
       currentRow++;
+
       var scannerHeaders = [config.HEADERS.CALCULATIONS];
       dashSheet.getRange(currentRow, 1, 1, scannerHeaders[0].length).setValues(scannerHeaders);
       currentRow++;
+
       if (calcData.length > 0) {
         dashSheet.getRange(currentRow, 1, calcData.length, calcData[0].length).setValues(calcData);
       }

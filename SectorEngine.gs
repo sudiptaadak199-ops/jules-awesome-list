@@ -1,0 +1,123 @@
+/**
+ * SectorEngine.gs - Sector Aggregation, Sector Relative Strength & Stage Classification
+ * Author: Quantitative Trading System Architect
+ */
+
+/**
+ * Aggregates stock-level indicators into sector performance metrics and classifies Sector Rotation Stages.
+ * Uses single-pass running totals for O(N) linear time sector aggregation.
+ */
+function calculateSectorRotation() {
+  var config = getConfig();
+
+  logSystem("INFO", "SectorEngine", "Aggregating sector-level metrics and calculating rotation stages...", null);
+
+  var calcData = readBatchData(config.SHEETS.CALCULATIONS);
+  if (calcData.length === 0) {
+    logSystem("WARN", "SectorEngine", "Calculations sheet is empty. Running indicator engine first...", null);
+    calcData = calculateAllIndicators();
+  }
+
+  // Group calculation records by Sector using running totals O(N)
+  var sectorsMap = {};
+
+  for (var i = 0; i < calcData.length; i++) {
+    var row = calcData[i];
+    var sector = row[2] || "Unassigned";
+    if (sector === "Benchmark" || sector === "General") continue;
+
+    if (!sectorsMap[sector]) {
+      sectorsMap[sector] = {
+        totalStocks: 0,
+        advancing: 0,
+        declining: 0,
+        sumRvol: 0,
+        sumVolAccel: 0,
+        sumReturn20D: 0,
+        sumRS: 0,
+        sumDelPct: 0
+      };
+    }
+
+    var sec = sectorsMap[sector];
+    sec.totalStocks++;
+
+    var changePct = safeNumber(row[5], 0);
+    if (changePct > 0) sec.advancing++;
+    else if (changePct < 0) sec.declining++;
+
+    sec.sumRvol += safeNumber(row[10], 1.0);
+    sec.sumVolAccel += safeNumber(row[12], 1.0);
+    sec.sumDelPct += safeNumber(row[14], 0);
+    sec.sumReturn20D += safeNumber(row[19], 0);
+    sec.sumRS += safeNumber(row[25], 0);
+  }
+
+  var sectorResults = [];
+  var todayStr = formatDateKey(new Date());
+
+  for (var sectorName in sectorsMap) {
+    var s = sectorsMap[sectorName];
+    var total = s.totalStocks || 1;
+    var breadthPct = Math.round((s.advancing / total) * 100);
+
+    var avgRvol = Math.round((s.sumRvol / total) * 100) / 100;
+    var avgVolAccel = Math.round((s.sumVolAccel / total) * 100) / 100;
+    var avg20DReturn = Math.round((s.sumReturn20D / total) * 100) / 100;
+    var sectorRS = Math.round((s.sumRS / total) * 100) / 100;
+    var avgDelivery = Math.round((s.sumDelPct / total) * 100) / 100;
+
+    // Sector New Money Score Calculation (0-100)
+    // Formula: 40% RVOL + 30% Vol Accel + 20% Breadth + 10% Sector RS
+    var normRvol = normalizeToRange(avgRvol, 0.8, 3.0);
+    var normVolAccel = normalizeToRange(avgVolAccel, 0.8, 2.0);
+    var normBreadth = breadthPct;
+    var normRS = normalizeToRange(sectorRS, -10, 10);
+
+    var sectorMoneyScore = Math.round(
+      (normRvol * 0.40) +
+      (normVolAccel * 0.30) +
+      (normBreadth * 0.20) +
+      (normRS * 0.10)
+    );
+
+    var stage = "Lagging";
+
+    if (sectorMoneyScore >= 70 && avg20DReturn <= 3.0) {
+      stage = "Accumulation / Early Rotation";
+    } else if (sectorRS > 3.0 && breadthPct >= 60) {
+      stage = "Leading";
+    } else if (sectorRS >= 0 && avgVolAccel >= 1.05 && sectorMoneyScore >= 55) {
+      stage = "Improving";
+    } else if (sectorRS >= 0 && breadthPct < 45) {
+      stage = "Weakening";
+    } else {
+      stage = "Lagging";
+    }
+
+    var row = [
+      sectorName,
+      total,
+      s.advancing,
+      s.declining,
+      breadthPct,
+      avgRvol,
+      avgVolAccel,
+      avg20DReturn,
+      sectorRS,
+      avgDelivery,
+      sectorMoneyScore,
+      stage,
+      todayStr
+    ];
+
+    sectorResults.push(row);
+  }
+
+  // Fast direct score sorting
+  sectorResults.sort(function(a, b) { return b[10] - a[10]; });
+
+  writeBatchData(config.SHEETS.SECTOR_DATA, 2, 1, sectorResults, true);
+  logSystem("INFO", "SectorEngine", "Completed sector rotation calculations for " + sectorResults.length + " sectors.", null);
+  return sectorResults;
+}

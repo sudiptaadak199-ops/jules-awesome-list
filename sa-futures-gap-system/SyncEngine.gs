@@ -1,15 +1,14 @@
 /**
  * SA Automatic Futures Gap Analysis System
- * SyncEngine.gs - Automatic symbol change detection, daily EOD update, missing dates recovery, and duplicate prevention.
+ * SyncEngine.gs - Automatic symbol change detection, daily EOD update, 6-month missing dates recovery, and duplicate prevention.
  */
 
 var SyncEngine = {
   /**
    * Run synchronization cycle:
    * 1. Detect if user added new symbols or modified existing symbols.
-   *    If new symbols found, initiate backfill specifically for those symbols.
    * 2. Perform daily EOD update for today / latest trading day.
-   * 3. Check for any missing historical dates and recover them.
+   * 3. Check for any missing historical dates across the full configured 6-month period and recover them.
    */
   syncAll: function() {
     SheetManager.initializeSheets();
@@ -26,7 +25,7 @@ var SyncEngine = {
     // 2. Perform daily update for today/latest trading day
     this.runDailyUpdate(activeSymbols);
 
-    // 3. Scan and recover missing dates
+    // 3. Scan and recover missing dates across full 6 months
     this.recoverMissingDates(activeSymbols);
 
     // Refresh dashboard overview
@@ -35,7 +34,7 @@ var SyncEngine = {
 
   /**
    * Detect symbols in 'Symbols' sheet that have zero historical records in 'Futures Gap Analysis'
-   * and automatically backfill history for them.
+   * and automatically trigger backfill for them.
    */
   detectAndBackfillNewSymbols: function(activeSymbols) {
     var existingKeys = SheetManager.getExistingRecordKeys();
@@ -58,8 +57,7 @@ var SyncEngine = {
     }
 
     if (newSymbols.length > 0) {
-      SheetManager.log('INFO', 'SymbolDetection', 'Detected ' + newSymbols.length + ' new symbol(s): ' + newSymbols.join(', ') + '. Starting backfill.');
-      // Run backfill specifically for these symbols
+      SheetManager.log('INFO', 'SymbolDetection', 'Detected ' + newSymbols.length + ' new symbol(s): ' + newSymbols.join(', ') + '. Initiating backfill.');
       BackfillEngine.runBackfill();
     }
   },
@@ -69,7 +67,6 @@ var SyncEngine = {
    */
   runDailyUpdate: function(activeSymbols) {
     var today = new Date();
-    // If weekend, get most recent Friday
     var targetDate = new Date(today);
     if (targetDate.getDay() === 0) { // Sunday -> Friday
       targetDate.setDate(targetDate.getDate() - 2);
@@ -105,8 +102,23 @@ var SyncEngine = {
     SheetManager.log('INFO', 'DailyUpdate', 'Fetching daily Bhavcopy for ' + dateStr + ' for ' + symbolsToUpdate.length + ' symbols.');
     var dailyData = DataProvider.fetchDailyDataForDate(targetDate, symbolsToUpdate);
 
-    if (!dailyData || !dailyData.isTradingDay || Object.keys(dailyData.symbolsData).length === 0) {
-      SheetManager.log('INFO', 'DailyUpdate', 'No market data available for ' + dateStr + ' (likely holiday or not yet published).');
+    if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
+      SheetManager.log('INFO', 'DailyUpdate', dateStr + ' is a confirmed holiday/non-trading day.');
+      return;
+    }
+
+    if (dailyData.status === DataProvider.STATUS.UNPUBLISHED) {
+      SheetManager.log('INFO', 'DailyUpdate', 'Market data for ' + dateStr + ' is not yet published. Will retry on next scheduled trigger.');
+      return;
+    }
+
+    if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR) {
+      SheetManager.log('WARN', 'DailyUpdate', 'Network error fetching ' + dateStr + ': ' + dailyData.errorMsg + '. Will be recovered in next run.');
+      return;
+    }
+
+    if (!dailyData.isTradingDay || Object.keys(dailyData.symbolsData).length === 0) {
+      SheetManager.log('INFO', 'DailyUpdate', 'No market data available for ' + dateStr);
       return;
     }
 
@@ -115,13 +127,11 @@ var SyncEngine = {
       var symbol = symbolsToUpdate[j];
       var stockData = dailyData.symbolsData[symbol];
       if (!stockData) {
-        SheetManager.log('WARN', 'DailyUpdate', 'Missing Bhavcopy data for symbol ' + symbol + ' on ' + dateStr);
         continue;
       }
 
       var mapped = ContractMapper.mapContractsForDate(targetDate, stockData);
       if (!mapped.currentContract) {
-        SheetManager.log('WARN', 'DailyUpdate', 'No active futures contracts for ' + symbol + ' on ' + dateStr);
         continue;
       }
 
@@ -145,10 +155,12 @@ var SyncEngine = {
   },
 
   /**
-   * Scan past trading days (e.g. last 30 trading days) to find and recover any missing dates
+   * Scan past trading days across the entire configured 6-month history (~125-130 trading days)
+   * to detect and safely recover any missing dates.
    */
   recoverMissingDates: function(activeSymbols) {
-    var tradingDays = Utils.getHistoricalTradingDays(1); // Last 1 month (~22 trading days)
+    // Scan full 6-month historical window
+    var tradingDays = Utils.getHistoricalTradingDays(6);
     var existingKeys = SheetManager.getExistingRecordKeys();
 
     var missingDays = [];
@@ -175,18 +187,33 @@ var SyncEngine = {
       }
     }
 
-    if (missingDays.length === 0) return;
+    if (missingDays.length === 0) {
+      return;
+    }
 
-    SheetManager.log('INFO', 'Recovery', 'Found ' + missingDays.length + ' missing dates to recover.');
-    // Process up to 5 missing dates per run to stay well within GAS execution limits
-    var recoveryBatch = missingDays.slice(0, 5);
+    SheetManager.log('INFO', 'Recovery', 'Found ' + missingDays.length + ' missing historical dates across 6 months. Processing recovery batch.');
+    // Process up to 10 missing dates per run to stay well within GAS execution limits
+    var recoveryBatch = missingDays.slice(0, 10);
     var recoveredRows = [];
 
     for (var m = 0; m < recoveryBatch.length; m++) {
       var mDate = recoveryBatch[m];
       var mDateStr = Utils.formatDateKey(mDate);
       var dailyData = DataProvider.fetchDailyDataForDate(mDate, activeSymbols);
-      if (!dailyData || !dailyData.isTradingDay) continue;
+
+      // Distinguish holidays vs transient errors
+      if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
+        // Legitimate holiday, nothing to recover
+        continue;
+      }
+      if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR || dailyData.status === DataProvider.STATUS.UNPUBLISHED) {
+        SheetManager.log('WARN', 'Recovery', 'Transient error recovering ' + mDateStr + ' (' + dailyData.errorMsg + '). Kept in recovery queue.');
+        continue;
+      }
+
+      if (!dailyData.isTradingDay || Object.keys(dailyData.symbolsData).length === 0) {
+        continue;
+      }
 
       for (var n = 0; n < activeSymbols.length; n++) {
         var sym = activeSymbols[n];
@@ -212,7 +239,7 @@ var SyncEngine = {
 
     if (recoveredRows.length > 0) {
       SheetManager.appendAnalysisRows(recoveredRows);
-      SheetManager.log('SUCCESS', 'Recovery', 'Successfully recovered ' + recoveredRows.length + ' missing historical records.');
+      SheetManager.log('SUCCESS', 'Recovery', 'Successfully recovered ' + recoveredRows.length + ' missing historical records across 6 months.');
     }
   }
 };

@@ -1,24 +1,40 @@
 /**
  * SA Automatic Futures Gap Analysis System
- * DataProvider.gs - Download and parse NSE UDiFF FO Bhavcopy, legacy FO Bhavcopy, Spot data, and Yahoo fallback.
- * Speed & Efficiency: Downloads each shared daily Bhavcopy file only once per date, not once per Symbol.
+ * DataProvider.gs - Download and parse NSE UDiFF FO Bhavcopy, legacy FO Bhavcopy, and historical Spot Bhavcopies.
+ *
+ * Rules:
+ * 1. Strictly official historical archives. NEVER use current prices (such as Yahoo regularMarketPrice) for past dates.
+ * 2. Shared daily Bhavcopy downloaded once per date and cached in memory across symbols.
+ * 3. Categorize results: SUCCESS, HOLIDAY, UNPUBLISHED, NETWORK_ERROR, PARSING_ERROR.
+ * 4. Never permanently skip dates after temporary network/HTTP failures.
  */
 
 var DataProvider = {
   // In-memory cache for the current script execution to prevent downloading the same date multiple times
   _dailyBhavcopyCache: {},
 
+  // Result status codes
+  STATUS: {
+    SUCCESS: 'SUCCESS',
+    HOLIDAY: 'HOLIDAY',                 // Confirmed non-trading day (weekend or NSE market holiday)
+    UNPUBLISHED: 'UNPUBLISHED',         // Current trading day not yet published (before ~18:00 IST)
+    NETWORK_ERROR: 'NETWORK_ERROR',     // 5xx or connection timeout / fetch failure (transient)
+    PARSING_ERROR: 'PARSING_ERROR'      // Response received but corrupted or unexpected schema
+  },
+
   /**
    * Fetch daily Bhavcopy data for a specific date and a target list of symbols.
    * Returns: {
    *   dateStr: 'YYYY-MM-DD',
+   *   status: 'SUCCESS' | 'HOLIDAY' | 'UNPUBLISHED' | 'NETWORK_ERROR' | 'PARSING_ERROR',
    *   isTradingDay: boolean,
    *   symbolsData: {
    *     'RELIANCE': {
    *       spotPrice: number | null,
    *       contracts: [ { expiryStr: 'YYYY-MM-DD', expiryDate: Date, closePrice: number, settlePrice: number, underlyingPrice: number } ]
    *     }
-   *   }
+   *   },
+   *   errorMsg: string | null
    * }
    */
   fetchDailyDataForDate: function(dateObj, targetSymbols) {
@@ -27,66 +43,123 @@ var DataProvider = {
       return this._filterForSymbols(this._dailyBhavcopyCache[dateKey], targetSymbols);
     }
 
-    var parsedData = null;
-
-    // 1. Try NSE UDiFF FO Bhavcopy (ZIP)
-    try {
-      parsedData = this._fetchNSEUdiffFO(dateObj);
-    } catch (e) {
-      // Logger.log('UDiFF fetch error: ' + e);
+    // Check if weekend
+    if (Utils.isWeekend(dateObj)) {
+      var holidayRes = {
+        dateStr: dateKey,
+        status: this.STATUS.HOLIDAY,
+        isTradingDay: false,
+        symbolsData: {},
+        errorMsg: 'Weekend (Saturday/Sunday)'
+      };
+      this._dailyBhavcopyCache[dateKey] = holidayRes;
+      return holidayRes;
     }
 
-    // 2. If UDiFF failed, try Legacy NSE FO Bhavcopy (ZIP)
-    if (!parsedData || Object.keys(parsedData.symbolsData).length === 0) {
-      try {
-        parsedData = this._fetchNSELegacyFO(dateObj);
-      } catch (e) {
-        // Logger.log('Legacy FO fetch error: ' + e);
+    var parsedData = null;
+    var fetchStatus = this.STATUS.NETWORK_ERROR;
+    var errorMsg = null;
+
+    // 1. Try NSE UDiFF FO Bhavcopy (ZIP)
+    var udiffRes = this._fetchNSEUdiffFO(dateObj);
+    if (udiffRes.status === this.STATUS.SUCCESS && udiffRes.data) {
+      parsedData = udiffRes.data;
+      fetchStatus = this.STATUS.SUCCESS;
+    } else {
+      fetchStatus = udiffRes.status;
+      errorMsg = udiffRes.error;
+    }
+
+    // 2. If UDiFF failed with 404/holiday or network error, check Legacy NSE FO Bhavcopy (for older dates)
+    if (!parsedData) {
+      var legacyRes = this._fetchNSELegacyFO(dateObj);
+      if (legacyRes.status === this.STATUS.SUCCESS && legacyRes.data) {
+        parsedData = legacyRes.data;
+        fetchStatus = this.STATUS.SUCCESS;
+        errorMsg = null;
       }
     }
 
-    // 3. If market day but spot prices are missing from FO bhavcopy, attempt Spot enrichment
+    // 3. If derivative data found but spot price (undrlygPric) is missing, enrich strictly from historical Cash Bhavcopy
     if (parsedData && parsedData.isTradingDay) {
       this._enrichSpotPrices(dateObj, parsedData);
     }
 
-    if (parsedData) {
-      this._dailyBhavcopyCache[dateKey] = parsedData;
-      return this._filterForSymbols(parsedData, targetSymbols);
+    var finalResult;
+    if (parsedData && fetchStatus === this.STATUS.SUCCESS) {
+      finalResult = {
+        dateStr: dateKey,
+        status: this.STATUS.SUCCESS,
+        isTradingDay: true,
+        symbolsData: parsedData.symbolsData,
+        errorMsg: null
+      };
+    } else {
+      // Determine if it was an unpublished today or a holiday
+      var isTodayOrFuture = this._isTodayOrFuture(dateObj);
+      if (fetchStatus === this.STATUS.HOLIDAY && isTodayOrFuture) {
+        fetchStatus = this.STATUS.UNPUBLISHED;
+      }
+
+      finalResult = {
+        dateStr: dateKey,
+        status: fetchStatus,
+        isTradingDay: false,
+        symbolsData: {},
+        errorMsg: errorMsg || ('Failed with status: ' + fetchStatus)
+      };
     }
 
-    return {
-      dateStr: dateKey,
-      isTradingDay: false,
-      symbolsData: {}
-    };
+    // Only cache definitive results (SUCCESS or confirmed past HOLIDAY), never cache transient errors permanently
+    if (finalResult.status === this.STATUS.SUCCESS || (finalResult.status === this.STATUS.HOLIDAY && !this._isTodayOrFuture(dateObj))) {
+      this._dailyBhavcopyCache[dateKey] = finalResult;
+    }
+
+    return this._filterForSymbols(finalResult, targetSymbols);
+  },
+
+  _isTodayOrFuture: function(dateObj) {
+    var today = new Date();
+    var dMidnight = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+    var tMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    return dMidnight >= tMidnight;
   },
 
   /**
    * Fetch and parse NSE UDiFF FO Bhavcopy (ZIP format).
-   * File URL pattern: https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip
    */
   _fetchNSEUdiffFO: function(dateObj) {
     var ymd = Utils.formatYYYYMMDD(dateObj);
     var dateKey = Utils.formatDateKey(dateObj);
     var url = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
-    var csvText = this._fetchAndUnzipCsv(url);
 
-    if (!csvText) {
+    var res = this._fetchAndUnzipCsv(url);
+    if (res.status !== this.STATUS.SUCCESS) {
       // Try alt URL
       var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
-      csvText = this._fetchAndUnzipCsv(altUrl);
+      var altRes = this._fetchAndUnzipCsv(altUrl);
+      if (altRes.status === this.STATUS.SUCCESS) {
+        res = altRes;
+      }
     }
 
-    if (!csvText) return null;
+    if (res.status !== this.STATUS.SUCCESS) {
+      return { status: res.status, data: null, error: res.error };
+    }
 
-    return this.parseUdiffFOCsv(csvText, dateKey);
+    var parsed = this.parseUdiffFOCsv(res.csvText, dateKey);
+    if (!parsed) {
+      return { status: this.STATUS.PARSING_ERROR, data: null, error: 'Failed to parse UDiFF CSV structure' };
+    }
+
+    return { status: this.STATUS.SUCCESS, data: parsed, error: null };
   },
 
   /**
    * Parse CSV content of modern NSE UDiFF FO Bhavcopy.
    */
   parseUdiffFOCsv: function(csvText, dateKey) {
+    if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
     if (lines.length < 2) return null;
 
@@ -134,8 +207,7 @@ var DataProvider = {
       var expiryKey = Utils.formatDateKey(expiryDate);
 
       var closePrice = Utils.safeFloat(cols[colIdx.clsPric]);
-      var settlePrice = Utils.safeFloat(cols[colIdx.sttlmPric]);
-      // Use closePrice if available, else settlePrice
+      var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
       var futurePrice = (closePrice !== null) ? closePrice : settlePrice;
 
       var undrlygPrice = (colIdx.undrlygPric !== -1) ? Utils.safeFloat(cols[colIdx.undrlygPric]) : null;
@@ -163,7 +235,6 @@ var DataProvider = {
 
   /**
    * Fetch and parse Legacy NSE FO Bhavcopy (ZIP format).
-   * URL format: https://archives.nseindia.com/content/historical/DERIVATIVES/YYYY/MMM/foDDMMMYYYYbhav.csv.zip
    */
   _fetchNSELegacyFO: function(dateObj) {
     var dateKey = Utils.formatDateKey(dateObj);
@@ -178,16 +249,24 @@ var DataProvider = {
       .replace('{MMM}', mmm)
       .replace('{YYYY}', yyyy);
 
-    var csvText = this._fetchAndUnzipCsv(url);
-    if (!csvText) return null;
+    var res = this._fetchAndUnzipCsv(url);
+    if (res.status !== this.STATUS.SUCCESS) {
+      return { status: res.status, data: null, error: res.error };
+    }
 
-    return this.parseLegacyFOCsv(csvText, dateKey);
+    var parsed = this.parseLegacyFOCsv(res.csvText, dateKey);
+    if (!parsed) {
+      return { status: this.STATUS.PARSING_ERROR, data: null, error: 'Failed to parse legacy CSV structure' };
+    }
+
+    return { status: this.STATUS.SUCCESS, data: parsed, error: null };
   },
 
   /**
    * Parse CSV content of legacy NSE FO Bhavcopy.
    */
   parseLegacyFOCsv: function(csvText, dateKey) {
+    if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
     if (lines.length < 2) return null;
 
@@ -236,7 +315,7 @@ var DataProvider = {
 
       if (!result.symbolsData[symbol]) {
         result.symbolsData[symbol] = {
-          spotPrice: null, // Legacy FO bhavcopy does not include spot price
+          spotPrice: null,
           contracts: []
         };
       }
@@ -254,7 +333,7 @@ var DataProvider = {
   },
 
   /**
-   * Enrich missing Spot prices using NSE CM / Sec Bhavcopy or Yahoo Finance fallback
+   * Enrich missing Spot prices using historical NSE CM / Sec Bhavcopy archives only
    */
   _enrichSpotPrices: function(dateObj, parsedData) {
     var symbolsNeedingSpot = [];
@@ -271,28 +350,31 @@ var DataProvider = {
     // Try NSE CM Sec Bhavcopy
     var ddmmyyyy = Utils.formatDDMMYYYY(dateObj);
     var cmUrl = CONFIG.URLS.NSE_CM_SEC.replace('{DDMMYYYY}', ddmmyyyy);
-    var cmText = this._fetchHttpText(cmUrl);
-    if (!cmText) {
+    var cmRes = this._fetchHttpText(cmUrl);
+    if (cmRes.status !== this.STATUS.SUCCESS || !cmRes.text) {
       var cmAltUrl = CONFIG.URLS.NSE_CM_SEC_ALT.replace('{DDMMYYYY}', ddmmyyyy);
-      cmText = this._fetchHttpText(cmAltUrl);
+      cmRes = this._fetchHttpText(cmAltUrl);
     }
 
-    if (cmText) {
-      this._parseAndApplySpotFromCmSec(cmText, parsedData, symbolsNeedingSpot);
+    if (cmRes.status === this.STATUS.SUCCESS && cmRes.text) {
+      this._parseAndApplySpotFromCmSec(cmRes.text, parsedData, symbolsNeedingSpot);
+      return;
     }
 
-    // If still missing and Yahoo fallback enabled, try Yahoo chart fallback
-    // (Only if single date or daily trigger run)
-    var stillMissing = [];
-    for (var j = 0; j < symbolsNeedingSpot.length; j++) {
-      var sym = symbolsNeedingSpot[j];
-      if (parsedData.symbolsData[sym].spotPrice === null) {
-        stillMissing.push(sym);
-      }
-    }
+    // If still missing, try legacy CM bhavcopy (ZIP)
+    var yyyy = dateObj.getFullYear();
+    var mmm = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][dateObj.getMonth()];
+    var dd = ('0' + dateObj.getDate()).slice(-2);
+    var legacyCmUrl = CONFIG.URLS.NSE_LEGACY_CM
+      .replace('{YYYY}', yyyy)
+      .replace('{MMM}', mmm)
+      .replace('{DD}', dd)
+      .replace('{MMM}', mmm)
+      .replace('{YYYY}', yyyy);
 
-    if (stillMissing.length > 0) {
-      this._applyYahooSpotFallback(dateObj, parsedData, stillMissing);
+    var legRes = this._fetchAndUnzipCsv(legacyCmUrl);
+    if (legRes.status === this.STATUS.SUCCESS && legRes.csvText) {
+      this._parseAndApplySpotFromLegacyCm(legRes.csvText, parsedData, symbolsNeedingSpot);
     }
   },
 
@@ -303,7 +385,7 @@ var DataProvider = {
     var lines = cmText.split(/\r?\n/);
     if (lines.length < 2) return;
 
-    var headers = lines[0].split(',').map(function(h) { return h.trim(); });
+    var headers = lines[0].split(',').map(function(h) { return h.trim().toUpperCase(); });
     var symIdx = headers.indexOf('SYMBOL');
     var seriesIdx = headers.indexOf('SERIES');
     var closeIdx = headers.indexOf('CLOSE_PRICE');
@@ -312,15 +394,15 @@ var DataProvider = {
 
     var targetSet = {};
     for (var k = 0; k < targetSymbols.length; k++) {
-      targetSet[targetSymbols[k]] = true;
+      targetSet[targetSymbols[k].toUpperCase()] = true;
     }
 
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      var cols = line.split(',');
-      var sym = (cols[symIdx] || '').trim().toUpperCase();
-      var series = (seriesIdx !== -1 && cols[seriesIdx]) ? cols[seriesIdx].trim().toUpperCase() : 'EQ';
+      var cols = line.split(',').map(function(c) { return c.trim(); });
+      var sym = (cols[symIdx] || '').toUpperCase();
+      var series = (seriesIdx !== -1 && cols[seriesIdx]) ? cols[seriesIdx].toUpperCase() : 'EQ';
 
       if (targetSet[sym] && (series === 'EQ' || series === 'BE')) {
         var spot = Utils.safeFloat(cols[closeIdx]);
@@ -332,27 +414,36 @@ var DataProvider = {
   },
 
   /**
-   * Fallback for spot prices using Yahoo Finance chart endpoint
+   * Parse Legacy CM bhavcopy CSV and apply Spot (Close) prices for series EQ
    */
-  _applyYahooSpotFallback: function(dateObj, parsedData, symbols) {
-    if (typeof UrlFetchApp === 'undefined') return;
-    for (var i = 0; i < symbols.length; i++) {
-      var sym = symbols[i];
-      try {
-        var url = CONFIG.URLS.YAHOO_CHART.replace('{SYMBOL}', encodeURIComponent(sym));
-        var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-        if (resp.getResponseCode() === 200) {
-          var data = JSON.parse(resp.getContentText());
-          var result = data.chart && data.chart.result && data.chart.result[0];
-          if (result && result.meta && result.meta.regularMarketPrice !== undefined) {
-            var spot = Utils.safeFloat(result.meta.regularMarketPrice);
-            if (spot !== null && parsedData.symbolsData[sym]) {
-              parsedData.symbolsData[sym].spotPrice = spot;
-            }
-          }
+  _parseAndApplySpotFromLegacyCm: function(cmText, parsedData, targetSymbols) {
+    var lines = cmText.split(/\r?\n/);
+    if (lines.length < 2) return;
+
+    var headers = lines[0].split(',').map(function(h) { return h.trim().toUpperCase(); });
+    var symIdx = headers.indexOf('SYMBOL');
+    var seriesIdx = headers.indexOf('SERIES');
+    var closeIdx = headers.indexOf('CLOSE');
+
+    if (symIdx === -1 || closeIdx === -1) return;
+
+    var targetSet = {};
+    for (var k = 0; k < targetSymbols.length; k++) {
+      targetSet[targetSymbols[k].toUpperCase()] = true;
+    }
+
+    for (var i = 1; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line) continue;
+      var cols = line.split(',').map(function(c) { return c.trim(); });
+      var sym = (cols[symIdx] || '').toUpperCase();
+      var series = (seriesIdx !== -1 && cols[seriesIdx]) ? cols[seriesIdx].toUpperCase() : 'EQ';
+
+      if (targetSet[sym] && (series === 'EQ' || series === 'BE')) {
+        var spot = Utils.safeFloat(cols[closeIdx]);
+        if (spot !== null && parsedData.symbolsData[sym]) {
+          parsedData.symbolsData[sym].spotPrice = spot;
         }
-      } catch (e) {
-        // Fallback error, leave null
       }
     }
   },
@@ -371,7 +462,7 @@ var DataProvider = {
     }
 
     var filteredSymbols = {};
-    var symKeys = Object.keys(dailyData.symbolsData);
+    var symKeys = Object.keys(dailyData.symbolsData || {});
     for (var j = 0; j < symKeys.length; j++) {
       var s = symKeys[j];
       if (targetSet[s]) {
@@ -381,8 +472,10 @@ var DataProvider = {
 
     return {
       dateStr: dailyData.dateStr,
+      status: dailyData.status,
       isTradingDay: dailyData.isTradingDay,
-      symbolsData: filteredSymbols
+      symbolsData: filteredSymbols,
+      errorMsg: dailyData.errorMsg
     };
   },
 
@@ -390,7 +483,9 @@ var DataProvider = {
    * Helper to fetch HTTP text safely (in GAS via UrlFetchApp)
    */
   _fetchHttpText: function(url) {
-    if (typeof UrlFetchApp === 'undefined') return null;
+    if (typeof UrlFetchApp === 'undefined') {
+      return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'UrlFetchApp unavailable' };
+    }
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
@@ -399,20 +494,26 @@ var DataProvider = {
           'Accept': '*/*'
         }
       });
-      if (resp.getResponseCode() === 200) {
-        return resp.getContentText();
+      var code = resp.getResponseCode();
+      if (code === 200) {
+        return { status: this.STATUS.SUCCESS, text: resp.getContentText(), error: null };
+      } else if (code === 404) {
+        return { status: this.STATUS.HOLIDAY, text: null, error: 'HTTP 404 Not Found' };
+      } else {
+        return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'HTTP ' + code };
       }
     } catch (e) {
-      return null;
+      return { status: this.STATUS.NETWORK_ERROR, text: null, error: e.message };
     }
-    return null;
   },
 
   /**
-   * Helper to fetch ZIP file and extract the primary CSV inside (in GAS via Utilities.unzip)
+   * Helper to fetch ZIP file and extract primary CSV (in GAS via Utilities.unzip)
    */
   _fetchAndUnzipCsv: function(url) {
-    if (typeof UrlFetchApp === 'undefined' || typeof Utilities === 'undefined') return null;
+    if (typeof UrlFetchApp === 'undefined' || typeof Utilities === 'undefined') {
+      return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'GAS services unavailable' };
+    }
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
@@ -421,16 +522,21 @@ var DataProvider = {
           'Accept': '*/*'
         }
       });
-      if (resp.getResponseCode() === 200) {
+      var code = resp.getResponseCode();
+      if (code === 200) {
         var blob = resp.getBlob();
         var unzippedBlobs = Utilities.unzip(blob);
         if (unzippedBlobs && unzippedBlobs.length > 0) {
-          return unzippedBlobs[0].getDataAsString();
+          return { status: this.STATUS.SUCCESS, csvText: unzippedBlobs[0].getDataAsString(), error: null };
         }
+        return { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file' };
+      } else if (code === 404) {
+        return { status: this.STATUS.HOLIDAY, csvText: null, error: 'HTTP 404 (Holiday or unavailable)' };
+      } else {
+        return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'HTTP ' + code };
       }
     } catch (e) {
-      return null;
+      return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: e.message };
     }
-    return null;
   }
 };

@@ -2,10 +2,11 @@
  * SA Automatic Futures Gap Analysis System
  * BackfillEngine.gs - Resumable historical backfill for ~6 months of trading-day data.
  * Features:
- * - Automatically checks existing records and skips already-processed dates
- * - Checkpoints state in PropertiesService to prevent Google Apps Script execution timeout (6-minute limit)
+ * - Checks existing records and skips already-processed dates
+ * - Checkpoints state in PropertiesService
+ * - Automatically continues batches via time-driven trigger until 100% completion
+ * - Differentiates holidays vs transient network failures (never drops failed dates permanently)
  * - Single daily Bhavcopy download per date shared across all active symbols
- * - Preserves valid historical records without fabrication or zero-substitution
  */
 
 var BackfillEngine = {
@@ -13,7 +14,8 @@ var BackfillEngine = {
 
   /**
    * Run historical backfill batch.
-   * If not completed, stores next checkpoint in PropertiesService and returns { completed: false }.
+   * If not completed, stores next checkpoint in PropertiesService, schedules continuation trigger,
+   * and returns { completed: false }.
    */
   runBackfill: function() {
     SheetManager.initializeSheets();
@@ -28,32 +30,32 @@ var BackfillEngine = {
     var months = settings.months || 6;
     var batchSize = settings.batchSize || 15;
 
-    // Load or generate trading days queue
+    // Load or initialize trading days queue
     var state = this._loadState();
     var tradingDaysQueue;
+    var failedRetryMap;
 
     if (!state || !state.datesQueue || state.datesQueue.length === 0) {
       var allDays = Utils.getHistoricalTradingDays(months);
-      // Format as YYYY-MM-DD
       var dateStrings = allDays.map(function(d) {
         return Utils.formatDateKey(d);
       });
       tradingDaysQueue = dateStrings;
+      failedRetryMap = {};
       SheetManager.log('INFO', 'Backfill', 'Initialized new 6-month backfill queue with ' + tradingDaysQueue.length + ' trading days.');
     } else {
       tradingDaysQueue = state.datesQueue;
+      failedRetryMap = state.failedRetryMap || {};
       SheetManager.log('INFO', 'Backfill', 'Resuming backfill. Remaining dates in queue: ' + tradingDaysQueue.length);
     }
 
-    // Get existing keys to prevent duplicate insertions
     var existingKeys = SheetManager.getExistingRecordKeys();
-
-    // Take next batch of days
     var daysToProcess = tradingDaysQueue.slice(0, batchSize);
     var remainingQueue = tradingDaysQueue.slice(batchSize);
 
     var rowsToAdd = [];
     var processedCount = 0;
+    var reenqueueDates = [];
 
     for (var i = 0; i < daysToProcess.length; i++) {
       var dateStr = daysToProcess[i];
@@ -79,15 +81,37 @@ var BackfillEngine = {
       }
 
       if (allSymbolsPresent) {
-        // Skip already-processed date
+        // Already processed and stored
         processedCount++;
         continue;
       }
 
       // Download shared daily Bhavcopy ONCE for this date
       var dailyData = DataProvider.fetchDailyDataForDate(dateObj, activeSymbols);
-      if (!dailyData || !dailyData.isTradingDay || Object.keys(dailyData.symbolsData).length === 0) {
-        // Market holiday or closed; proceed
+
+      // Check fetch status
+      if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
+        // Confirmed market holiday or weekend; safe to skip permanently
+        processedCount++;
+        continue;
+      }
+
+      if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR || dailyData.status === DataProvider.STATUS.UNPUBLISHED) {
+        // Transient error or not yet published: DO NOT permanently drop!
+        // Increment retry count; re-enqueue if within limit
+        var retries = (failedRetryMap[dateStr] || 0) + 1;
+        failedRetryMap[dateStr] = retries;
+        if (retries <= 3) {
+          reenqueueDates.push(dateStr);
+          SheetManager.log('WARN', 'Backfill', 'Transient failure for ' + dateStr + ' (' + dailyData.errorMsg + '). Re-queuing (attempt ' + retries + '/3).');
+        } else {
+          SheetManager.log('ERROR', 'Backfill', 'Max retries reached for ' + dateStr + '. Will be left for periodic recovery.');
+        }
+        processedCount++;
+        continue;
+      }
+
+      if (!dailyData.isTradingDay || Object.keys(dailyData.symbolsData).length === 0) {
         processedCount++;
         continue;
       }
@@ -97,12 +121,12 @@ var BackfillEngine = {
         var symbol = activeSymbols[j];
         var stockData = dailyData.symbolsData[symbol];
         if (!stockData) {
-          continue; // Missing symbol data for date
+          continue;
         }
 
         var mapped = ContractMapper.mapContractsForDate(dateObj, stockData);
         if (!mapped.currentContract) {
-          continue; // No active contracts
+          continue;
         }
 
         var curPrice = mapped.currentContract.closePrice;
@@ -112,7 +136,7 @@ var BackfillEngine = {
 
         var recKey = Utils.makeRecordKey(dateStr, symbol, histExpiry);
         if (existingKeys[recKey]) {
-          continue; // Duplicate prevention
+          continue;
         }
 
         var row = GapEngine.buildAnalysisRow(dateStr, symbol, spot, curPrice, nextPrice, histExpiry);
@@ -123,29 +147,36 @@ var BackfillEngine = {
       processedCount++;
     }
 
-    // Bulk append rows
+    // Bulk append newly processed rows
     if (rowsToAdd.length > 0) {
       SheetManager.appendAnalysisRows(rowsToAdd);
       SheetManager.refreshDashboardSummary();
       SheetManager.log('INFO', 'Backfill', 'Appended ' + rowsToAdd.length + ' historical rows for ' + processedCount + ' days.');
     }
 
-    if (remainingQueue.length > 0) {
-      this._saveState({ datesQueue: remainingQueue });
-      SheetManager.log('INFO', 'Backfill', 'Batch complete. ' + remainingQueue.length + ' dates remaining. Continuing in next cycle.');
-      return { completed: false, remaining: remainingQueue.length, newRows: rowsToAdd.length };
+    // Combine remaining queue with any transient re-enqueued dates
+    var combinedRemaining = remainingQueue.concat(reenqueueDates);
+
+    if (combinedRemaining.length > 0) {
+      this._saveState({ datesQueue: combinedRemaining, failedRetryMap: failedRetryMap });
+      SheetManager.log('INFO', 'Backfill', 'Batch finished. ' + combinedRemaining.length + ' dates remaining. Triggering auto-continuation.');
+      // Automatically chain next batch execution via trigger
+      Triggers.scheduleBackfillContinuation();
+      return { completed: false, remaining: combinedRemaining.length, newRows: rowsToAdd.length };
     } else {
       this._clearState();
-      SheetManager.log('SUCCESS', 'Backfill', 'Historical 6-month backfill successfully completed!');
+      Triggers.removeContinuationTrigger();
+      SheetManager.log('SUCCESS', 'Backfill', 'Historical 6-month backfill successfully completed 100%!');
       return { completed: true, remaining: 0, newRows: rowsToAdd.length };
     }
   },
 
   /**
-   * Reset the backfill state checkpoint
+   * Reset the backfill state checkpoint and remove continuation triggers
    */
   resetBackfillState: function() {
     this._clearState();
+    Triggers.removeContinuationTrigger();
   },
 
   _loadState: function() {

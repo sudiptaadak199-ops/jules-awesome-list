@@ -18,8 +18,8 @@ var ContractMapper = {
    *   Once tradeDate > Expiry Date 1, Contract 1 is expired, and Contract 2 automatically rolls over to become the Current Future.
    *
    * Returns: {
-   *   currentContract: { expiryStr, expiryDate, closePrice, settlePrice } | null,
-   *   nextContract: { expiryStr, expiryDate, closePrice, settlePrice } | null,
+   *   currentContract: { expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
+   *   nextContract: { expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
    *   spotPrice: number | null,
    *   historicalExpiryDate: string (YYYY-MM-DD) | null
    * }
@@ -35,6 +35,10 @@ var ContractMapper = {
     }
 
     var tradeDateObj = (tradeDate instanceof Date) ? tradeDate : Utils.parseDate(tradeDate);
+    if (!tradeDateObj) {
+      return { currentContract: null, nextContract: null, spotPrice: null, historicalExpiryDate: null };
+    }
+
     // Normalize tradeDate to start of day (midnight)
     var tradeMidnight = new Date(tradeDateObj.getFullYear(), tradeDateObj.getMonth(), tradeDateObj.getDate());
 
@@ -63,7 +67,7 @@ var ContractMapper = {
       return expMidnight >= tradeMidnight;
     });
 
-    // Sort ascending by expiry date
+    // Sort ascending by expiry date (earliest expiry first)
     unexpired.sort(function(a, b) {
       return a.expiryDate.getTime() - b.expiryDate.getTime();
     });
@@ -76,10 +80,15 @@ var ContractMapper = {
       histExpiryDate = Utils.formatDateKey(current.expiryDate);
     }
 
+    // Prefer spotPrice on stockData, else underlyingPrice from current contract
+    var resolvedSpot = (stockData.spotPrice !== null && stockData.spotPrice !== undefined)
+      ? stockData.spotPrice
+      : (current && current.underlyingPrice !== null && current.underlyingPrice !== undefined ? current.underlyingPrice : null);
+
     return {
       currentContract: current,
       nextContract: next,
-      spotPrice: stockData.spotPrice,
+      spotPrice: resolvedSpot,
       historicalExpiryDate: histExpiryDate
     };
   }

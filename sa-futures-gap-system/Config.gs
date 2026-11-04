@@ -5,7 +5,7 @@
 
 var CONFIG = {
   PROJECT_NAME: 'SA Futures Gap System',
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
   TIMEZONE: 'Asia/Kolkata',
 
   // Sheet Names
@@ -46,29 +46,24 @@ var CONFIG = {
     ['BACKFILL_MONTHS', 6, 'Number of months of trading days to backfill historically (default: 6)'],
     ['MAX_DAYS_PER_BATCH', 15, 'Maximum trading days processed per backfill trigger iteration to prevent GAS timeouts'],
     ['ENABLE_AUTO_TRIGGERS', 'TRUE', 'Whether daily automatic 18:30 IST market close trigger is enabled'],
-    ['DATA_SOURCE_MODE', 'LIVE', 'Data source mode: LIVE (NSE Bhavcopy + Fallback) or MOCK (for testing)'],
-    ['YAHOO_FALLBACK_ENABLED', 'TRUE', 'Enable Yahoo Finance API chart fallback for missing Spot data'],
+    ['DATA_SOURCE_MODE', 'LIVE', 'Data source mode: LIVE (NSE Bhavcopy archives)'],
+    ['MAX_RETRIES_PER_DATE', 3, 'Maximum retry attempts for transient errors before queuing for scheduled recovery'],
     ['MAX_LOG_ROWS', 1000, 'Maximum log rows to retain in Logs sheet']
   ],
 
-  // Free Data Sources URLs
+  // Free Data Sources URLs (Strictly official historical archives - no current price fallbacks for past dates)
   URLS: {
-    // Modern NSE UDiFF FO Bhavcopy (effective July/August 2024 onwards)
-    // Format: https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip
+    // Modern NSE UDiFF FO Bhavcopy (ZIP)
     NSE_UDIFF_FO: 'https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip',
     NSE_UDIFF_FO_ALT: 'https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip',
 
-    // Legacy NSE FO Bhavcopy (prior to UDiFF)
-    // Format: https://archives.nseindia.com/content/historical/DERIVATIVES/YYYY/MMM/foDDMMMYYYYbhav.csv.zip
+    // Legacy NSE FO Bhavcopy (ZIP)
     NSE_LEGACY_FO: 'https://archives.nseindia.com/content/historical/DERIVATIVES/{YYYY}/{MMM}/fo{DD}{MMM}{YYYY}bhav.csv.zip',
 
     // NSE CM Bhavcopy (Cash market / Spot fallback if UDiFF UndrlygPric missing)
     NSE_CM_SEC: 'https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
     NSE_CM_SEC_ALT: 'https://archives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
-    NSE_LEGACY_CM: 'https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip',
-
-    // Yahoo Finance spot quote / daily chart fallback
-    YAHOO_CHART: 'https://query1.finance.yahoo.com/v8/finance/chart/{SYMBOL}.NS?range=1d&interval=1d'
+    NSE_LEGACY_CM: 'https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip'
   },
 
   // Color Palette ('Cool Tech' Professional Theme)

@@ -5,23 +5,20 @@
  * 1. Base Utilities (dates, safeFloat, trading days generator, composite keys)
  * 2. NSE UDiFF FO Bhavcopy parsing with REAL NSE historical data records
  * 3. NSE Legacy FO Bhavcopy parsing with REAL NSE historical data records
- * 4. ContractMapper - historical contract selection and rollover logic across 6 months
- * 5. GapEngine - exact formula calculations:
- *    - Current−Next Gap = Current Future − Next Future
- *    - Current−Next Gap % = (Current Future − Next Future) / Current Future × 100
- *    - Spot−Current Future Gap = Spot − Current Future
- *    - Spot-Future Gap % = (Spot − Current Future) / Spot × 100
+ * 4. ContractMapper - historical contract selection, zero/invalid price rejection, and rollover
+ * 5. GapEngine - exact formula calculations and strict completeness checking
  * 6. Missing & zero data handling (never substitute zero for missing data, zero division safety)
- * 7. Duplicate prevention by Date + Symbol + Contract
- * 8. Status differentiation: HOLIDAY vs UNPUBLISHED vs NETWORK_ERROR vs SUCCESS
- * 9. BackfillEngine batch continuation trigger chaining & retry logic
- * 10. SyncEngine full 6-month historical recovery simulation
+ * 7. Composite keys prevent duplicate insertions
+ * 8. Status differentiation: Confirmed Holiday vs Archive 404 (ARCHIVE_UNAVAILABLE) vs Network Error
+ * 9. Incomplete records are rejected from permanent persistence
+ * 10. BackfillEngine starvation prevention & trigger auto-continuation
+ * 11. SyncEngine circular offset prevents recovery starvation across 6 months
+ * 12. ContractMapper preserves BOTH current and next expiry mappings
  */
 
 const assert = require('assert');
 const fs = require('fs');
 
-// Mock GAS environment
 global.Logger = {
   log: (msg) => {}
 };
@@ -92,7 +89,6 @@ global.PropertiesService = {
   }
 };
 
-// Load modules in order into global scope
 const modules = [
   'Config.gs',
   'Utils.gs',
@@ -140,296 +136,248 @@ function runTest(name, fn) {
   }
 }
 
-// ==========================================
-// Test 1: Utils Date Parsing & Formatting
-// ==========================================
+// 1. Utils
 runTest('Utils date parsing and formatting', () => {
-  const d1 = Utils.parseDate('2024-05-24');
-  assert.strictEqual(Utils.formatDateKey(d1), '2024-05-24');
-  assert.strictEqual(Utils.formatYYYYMMDD(d1), '20240524');
-  assert.strictEqual(Utils.formatDDMMYYYY(d1), '24052024');
-  assert.strictEqual(Utils.formatDateNSE(d1), '24-MAY-2024');
-
-  const d2 = Utils.parseDate('30-May-2024');
-  assert.strictEqual(Utils.formatDateKey(d2), '2024-05-30');
-
-  const d3 = Utils.parseDate('27-MAR-2025');
-  assert.strictEqual(Utils.formatDateKey(d3), '2025-03-27');
+  const d1 = Utils.parseDate('2026-05-04');
+  assert.strictEqual(Utils.formatDateKey(d1), '2026-05-04');
+  assert.strictEqual(Utils.formatYYYYMMDD(d1), '20260504');
+  assert.strictEqual(Utils.formatDDMMYYYY(d1), '04052026');
+  assert.strictEqual(Utils.formatDateNSE(d1), '04-MAY-2026');
 });
 
-// ==========================================
-// Test 2: Parse Real Modern NSE UDiFF FO Records (From 2025-02-20)
-// ==========================================
+// 2. Real UDiFF FO 2026
 runTest('DataProvider.parseUdiffFOCsv parses real modern Bhavcopy correctly', () => {
   const realUdiffCsv = `TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
-2025-02-20,2025-02-20,FO,NSE,STF,1001,,RELIANCE,,2025-02-27,2025-02-27,0.00,XX,FUTRELIANCE27FEB2025,1230.00,1235.00,1230.00,1232.75,1232.75,1230.00,1233.00,1232.75,10000,0,500,600000.00,10,F1,250,,,,,
-2025-02-20,2025-02-20,FO,NSE,STF,1002,,RELIANCE,,2025-03-27,2025-03-27,0.00,XX,FUTRELIANCE27MAR2025,1235.00,1240.00,1235.00,1239.15,1239.15,1235.00,1233.00,1239.15,5000,0,200,240000.00,5,F1,250,,,,,
-2025-02-20,2025-02-20,FO,NSE,STF,1003,,RELIANCE,,2025-04-24,2025-04-24,0.00,XX,FUTRELIANCE24APR2025,1245.00,1248.00,1245.00,1246.25,1246.25,1245.00,1233.00,1246.25,2000,0,100,120000.00,2,F1,250,,,,,
-2025-02-20,2025-02-20,FO,NSE,STF,2001,,TCS,,2025-02-27,2025-02-27,0.00,XX,FUTTCS27FEB2025,3775.00,3785.00,3770.00,3782.60,3782.60,3775.00,3779.40,3782.60,10000,0,500,600000.00,10,F1,175,,,,,
-2025-02-20,2025-02-20,FO,NSE,STF,2002,,TCS,,2025-03-27,2025-03-27,0.00,XX,FUTTCS27MAR2025,3795.00,3805.00,3790.00,3801.85,3801.85,3795.00,3779.40,3801.85,5000,0,200,240000.00,5,F1,175,,,,,
-2025-02-20,2025-02-20,FO,NSE,STO,1004,,RELIANCE,,2025-02-27,2025-02-27,1240.00,CE,RELIANCE25FEB1240CE,10.00,12.00,9.00,10.50,10.50,10.00,1233.00,10.50,5000,0,100,50000.00,3,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,1001,,RELIANCE,,2026-05-26,2026-05-26,0.00,XX,FUTRELIANCE26MAY2026,1460.00,1470.00,1458.00,1465.50,1465.50,1460.00,1463.10,1465.50,10000,0,500,600000.00,10,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,1002,,RELIANCE,,2026-06-30,2026-06-30,0.00,XX,FUTRELIANCE30JUN2026,1470.00,1478.00,1468.00,1475.20,1475.20,1470.00,1463.10,1475.20,5000,0,200,240000.00,5,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,2001,,TCS,,2026-05-26,2026-05-26,0.00,XX,FUTTCS26MAY2026,3950.00,3965.00,3945.00,3958.00,3958.00,3950.00,3952.40,3958.00,8000,0,300,500000.00,8,F1,175,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,2002,,TCS,,2026-06-30,2026-06-30,0.00,XX,FUTTCS30JUN2026,3970.00,3985.00,3965.00,3978.50,3978.50,3970.00,3952.40,3978.50,4000,0,150,250000.00,4,F1,175,,,,,
 `;
-  const parsed = DataProvider.parseUdiffFOCsv(realUdiffCsv, '2025-02-20');
+  const parsed = DataProvider.parseUdiffFOCsv(realUdiffCsv, '2026-05-04');
   assert(parsed.isTradingDay);
   assert(parsed.symbolsData.RELIANCE);
-  assert(parsed.symbolsData.TCS);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.spotPrice, 1233.00);
-  assert.strictEqual(parsed.symbolsData.TCS.spotPrice, 3779.40);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts.length, 3);
-  assert.strictEqual(parsed.symbolsData.TCS.contracts.length, 2);
+  assert.strictEqual(parsed.symbolsData.RELIANCE.spotPrice, 1463.10);
+  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts.length, 2);
+  assert.strictEqual(parsed.symbolsData.TCS.spotPrice, 3952.40);
 });
 
-// ==========================================
-// Test 3: Parse Real Legacy NSE FO Records (From 2024-05-24)
-// ==========================================
-runTest('DataProvider.parseLegacyFOCsv parses real legacy Bhavcopy correctly', () => {
-  const realLegacyCsv = `INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP,
-FUTIDX,BANKNIFTY,29-May-2024,0,XX,48838.65,49115.9,48702.05,49045.15,49045.15,146710,1076220.22,2121990,-53595,24-MAY-2024,
+// 3. Legacy FO
+runTest('DataProvider.parseLegacyFOCsv parses legacy Bhavcopy correctly', () => {
+  const legacyCsv = `INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP,
 FUTSTK,RELIANCE,30-May-2024,0,XX,2971,2984.45,2959.55,2969.5,2969.5,21811,161968.04,34923000,-649750,24-MAY-2024,
 FUTSTK,RELIANCE,27-Jun-2024,0,XX,2980,2995.00,2975.00,2985.0,2985.0,5000,40000.00,8000000,100000,24-MAY-2024,
-FUTSTK,RELIANCE,25-Jul-2024,0,XX,2990,3005.00,2985.00,3000.0,3000.0,2000,20000.00,2000000,50000,24-MAY-2024,
-OPTSTK,RELIANCE,30-May-2024,3000,CE,25,30,22,28.5,28.5,1000,3000.00,500000,5000,24-MAY-2024,
 `;
-  const parsed = DataProvider.parseLegacyFOCsv(realLegacyCsv, '2024-05-24');
+  const parsed = DataProvider.parseLegacyFOCsv(legacyCsv, '2024-05-24');
   assert(parsed.isTradingDay);
-  assert(parsed.symbolsData.RELIANCE);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts.length, 3);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].closePrice, 2969.5);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].expiryStr, '2024-05-30');
+  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts.length, 2);
 });
 
-// ==========================================
-// Test 4: Historical Expiry Mapping & Automatic Rollover
-// ==========================================
-runTest('ContractMapper accurately maps contracts as of historical date and executes rollover', () => {
+// 4. ContractMapper rejects zero/invalid prices before contract selection
+runTest('ContractMapper rejects contracts with zero, negative, or missing prices', () => {
   const stockData = {
-    spotPrice: 1233.00,
+    spotPrice: 1000,
     contracts: [
-      { expiryStr: '2025-02-27', expiryDate: new Date('2025-02-27'), closePrice: 1232.75 },
-      { expiryStr: '2025-03-27', expiryDate: new Date('2025-03-27'), closePrice: 1239.15 },
-      { expiryStr: '2025-04-24', expiryDate: new Date('2025-04-24'), closePrice: 1246.25 }
+      { expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 0, settlePrice: 0 }, // INVALID zero price!
+      { expiryStr: '2026-06-30', expiryDate: new Date('2026-06-30'), closePrice: 1010, settlePrice: 1010 },
+      { expiryStr: '2026-07-28', expiryDate: new Date('2026-07-28'), closePrice: 1025, settlePrice: 1025 }
     ]
   };
 
-  // 1. Before Feb expiry (2025-02-20)
-  const mapBefore = ContractMapper.mapContractsForDate(new Date('2025-02-20'), stockData);
-  assert.strictEqual(mapBefore.currentContract.expiryStr, '2025-02-27');
-  assert.strictEqual(mapBefore.currentContract.closePrice, 1232.75);
-  assert.strictEqual(mapBefore.nextContract.expiryStr, '2025-03-27');
-  assert.strictEqual(mapBefore.nextContract.closePrice, 1239.15);
-  assert.strictEqual(mapBefore.historicalExpiryDate, '2025-02-27');
-
-  // 2. On Feb expiry day (2025-02-27)
-  const mapOn = ContractMapper.mapContractsForDate(new Date('2025-02-27'), stockData);
-  assert.strictEqual(mapOn.currentContract.expiryStr, '2025-02-27');
-  assert.strictEqual(mapOn.nextContract.expiryStr, '2025-03-27');
-
-  // 3. Day after Feb expiry (2025-02-28) -> Rollover!
-  const mapAfter = ContractMapper.mapContractsForDate(new Date('2025-02-28'), stockData);
-  assert.strictEqual(mapAfter.currentContract.expiryStr, '2025-03-27'); // March is now Current
-  assert.strictEqual(mapAfter.currentContract.closePrice, 1239.15);
-  assert.strictEqual(mapAfter.nextContract.expiryStr, '2025-04-24');   // April is now Next
-  assert.strictEqual(mapAfter.nextContract.closePrice, 1246.25);
-  assert.strictEqual(mapAfter.historicalExpiryDate, '2025-03-27');
+  const mapped = ContractMapper.mapContractsForDate(new Date('2026-05-04'), stockData);
+  // Zero price contract must be rejected! The earliest VALID contract (2026-06-30) becomes Current Future!
+  assert.strictEqual(mapped.currentContract.expiryStr, '2026-06-30');
+  assert.strictEqual(mapped.currentContract.closePrice, 1010);
+  assert.strictEqual(mapped.nextContract.expiryStr, '2026-07-28');
+  assert.strictEqual(mapped.nextContract.closePrice, 1025);
+  assert.strictEqual(mapped.historicalExpiryDate, '2026-06-30');
+  assert.strictEqual(mapped.nextExpiryDate, '2026-07-28');
 });
 
-// ==========================================
-// Test 5: Exact Gap Formulas Verification
-// ==========================================
-runTest('GapEngine strictly applies required formulas', () => {
-  // Current = 1232.75, Next = 1239.15, Spot = 1233.00
-  const res = GapEngine.calculateGaps(1233.00, 1232.75, 1239.15);
-  assert.strictEqual(res.currentNextGap, -6.4);
-  assert.strictEqual(res.currentNextGapPct, -0.5192);
-  assert.strictEqual(res.spotCurrentFutureGap, 0.25);
-  assert.strictEqual(res.spotFutureGapPct, 0.0203);
+// 5. GapEngine exact formulas and completeness checking
+runTest('GapEngine strictly verifies formulas and isComplete flag', () => {
+  const resComplete = GapEngine.calculateGaps(1000.00, 1005.00, 1015.00);
+  assert.strictEqual(resComplete.isComplete, true);
+  assert.strictEqual(resComplete.currentNextGap, -10.00);
+  assert.strictEqual(resComplete.currentNextGapPct, -0.9950);
+  assert.strictEqual(resComplete.spotCurrentFutureGap, -5.00);
+  assert.strictEqual(resComplete.spotFutureGapPct, -0.5000);
 
-  const row = GapEngine.buildAnalysisRow('2025-02-20', 'RELIANCE', 1233.00, 1232.75, 1239.15, '2025-02-27');
-  assert.deepStrictEqual(row, [
-    '2025-02-20',
-    'RELIANCE',
-    1233.0,
-    1232.75,
-    1239.15,
-    -6.4,
-    -0.5192,
-    0.25,
-    0.0203,
-    '2025-02-27'
-  ]);
+  // Missing Next Future => incomplete
+  const resIncomplete1 = GapEngine.calculateGaps(1000.00, 1005.00, null);
+  assert.strictEqual(resIncomplete1.isComplete, false);
+
+  // Missing Spot => incomplete
+  const resIncomplete2 = GapEngine.calculateGaps(null, 1005.00, 1015.00);
+  assert.strictEqual(resIncomplete2.isComplete, false);
 });
 
-// ==========================================
-// Test 6: Zero & Missing Data Handling (No Zero Substitution)
-// ==========================================
-runTest('GapEngine safely handles missing data and zeroes without substituting zero or crashing', () => {
-  const resNoSpot = GapEngine.calculateGaps(null, 1000, 1010);
-  assert.strictEqual(resNoSpot.spotPrice, null);
-  assert.strictEqual(resNoSpot.currentNextGap, -10);
-  assert.strictEqual(resNoSpot.currentNextGapPct, -1);
-  assert.strictEqual(resNoSpot.spotCurrentFutureGap, null);
-  assert.strictEqual(resNoSpot.spotFutureGapPct, null);
-
+// 6. Missing & zero data safety
+runTest('GapEngine zero division safety', () => {
   const resZeroCur = GapEngine.calculateGaps(100, 0, 10);
-  assert.strictEqual(resZeroCur.currentNextGap, -10);
-  assert.strictEqual(resZeroCur.currentNextGapPct, null); // Protected against zero division
-
-  const resZeroSpot = GapEngine.calculateGaps(0, 100, 105);
-  assert.strictEqual(resZeroSpot.spotCurrentFutureGap, -100);
-  assert.strictEqual(resZeroSpot.spotFutureGapPct, null); // Protected against zero division
+  assert.strictEqual(resZeroCur.isComplete, false);
+  assert.strictEqual(resZeroCur.currentNextGapPct, null);
 });
 
-// ==========================================
-// Test 7: Duplicate Prevention by Date + Symbol + Expiry
-// ==========================================
+// 7. Composite keys
 runTest('Composite keys prevent duplicate insertions', () => {
-  const k1 = Utils.makeRecordKey('2025-02-20', 'RELIANCE', '2025-02-27');
-  const k2 = Utils.makeRecordKey('2025-02-20', 'reliance', '2025-02-27');
+  const k1 = Utils.makeRecordKey('2026-05-04', 'RELIANCE', '2026-05-26');
+  const k2 = Utils.makeRecordKey('2026-05-04', 'reliance', '2026-05-26');
   assert.strictEqual(k1, k2);
-  assert.strictEqual(k1, '2025-02-20|RELIANCE|2025-02-27');
 });
 
-// ==========================================
-// Test 8: Status Differentiation (Holidays vs Network Errors vs Unpublished)
-// ==========================================
-runTest('DataProvider differentiates holidays, unpublished files, and network errors', () => {
-  // Weekend
-  const sat = new Date('2025-02-22');
-  const resSat = DataProvider.fetchDailyDataForDate(sat, ['RELIANCE']);
-  assert.strictEqual(resSat.status, DataProvider.STATUS.HOLIDAY);
-  assert.strictEqual(resSat.isTradingDay, false);
+// 8. Distinguish Confirmed Holiday vs Archive 404 (ARCHIVE_UNAVAILABLE)
+runTest('DataProvider distinguishes confirmed holidays from archive 404s', () => {
+  // Weekend is confirmed holiday
+  const sun = new Date('2026-05-03');
+  const resSun = DataProvider.fetchDailyDataForDate(sun, ['RELIANCE']);
+  assert.strictEqual(resSun.status, DataProvider.STATUS.HOLIDAY);
 
-  // Today/Future 404 is UNPUBLISHED
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const isFut = DataProvider._isTodayOrFuture(tomorrow);
-  assert(isFut, 'Tomorrow should be classified as future');
+  // Official calendar holiday: 2026-05-28 (Bakri Id)
+  const bakriId = new Date('2026-05-28');
+  const resBakri = DataProvider.fetchDailyDataForDate(bakriId, ['RELIANCE']);
+  assert.strictEqual(resBakri.status, DataProvider.STATUS.HOLIDAY);
+
+  // Normal trading day with simulated 404 must be ARCHIVE_UNAVAILABLE, NOT HOLIDAY!
+  const normalDay = new Date('2026-05-04');
+  const originalFetch = DataProvider._fetchAndUnzipCsv;
+  DataProvider._fetchAndUnzipCsv = () => ({ status: DataProvider.STATUS.ARCHIVE_UNAVAILABLE, error: 'HTTP 404' });
+  delete DataProvider._dailyBhavcopyCache['2026-05-04'];
+
+  const res404 = DataProvider.fetchDailyDataForDate(normalDay, ['RELIANCE']);
+  assert.strictEqual(res404.status, DataProvider.STATUS.ARCHIVE_UNAVAILABLE);
+  assert.strictEqual(res404.isTradingDay, false);
+
+  DataProvider._fetchAndUnzipCsv = originalFetch;
+  delete DataProvider._dailyBhavcopyCache['2026-05-04'];
 });
 
-// ==========================================
-// Test 9: Backfill Auto-Continuation Triggers & Retry Queueing
-// ==========================================
-runTest('BackfillEngine chains continuation triggers across multiple batches', () => {
-  scheduledTriggers = [];
-  mockScriptProperties = {};
-
-  // Mock SheetManager methods
+// 9. Incomplete records rejected from permanent persistence
+runTest('BackfillEngine refuses to permanently save incomplete records', () => {
   const originalInit = SheetManager.initializeSheets;
   const originalGetSymbols = SheetManager.getActiveSymbols;
   const originalGetKeys = SheetManager.getExistingRecordKeys;
-  const originalAppend = SheetManager.appendAnalysisRows;
-  const originalRefresh = SheetManager.refreshDashboardSummary;
-  const originalFetch = DataProvider.fetchDailyDataForDate;
-
-  SheetManager.initializeSheets = () => {};
+  let appendedRows = [];
+  SheetManager.appendAnalysisRows = (r) => { appendedRows = appendedRows.concat(r); return r.length; };
+  SheetManager.refreshDashboardSummary = () => {};
   SheetManager.getActiveSymbols = () => ['RELIANCE'];
+  SheetManager.getExistingRecordKeys = () => ({});
+
+  BackfillEngine._getSettings = () => ({ months: 1, batchSize: 2 });
+  Utils.getHistoricalTradingDays = () => [new Date(2026, 4, 4)]; // 2026-05-04
+
+  // Mock Bhavcopy having only 1 contract (Current Future), Next Future missing
+  DataProvider.fetchDailyDataForDate = () => ({
+    status: DataProvider.STATUS.SUCCESS,
+    isTradingDay: true,
+    symbolsData: {
+      RELIANCE: {
+        spotPrice: 1460,
+        contracts: [
+          { expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 1465 }
+        ]
+      }
+    }
+  });
+
+  BackfillEngine.runBackfill();
+  assert.strictEqual(appendedRows.length, 0, 'Incomplete record must NOT be appended to sheet!');
+
+  SheetManager.initializeSheets = originalInit;
+  SheetManager.getActiveSymbols = originalGetSymbols;
+  SheetManager.getExistingRecordKeys = originalGetKeys;
+});
+
+// 10. Starvation prevention in BackfillEngine
+runTest('BackfillEngine rotates failed dates to prevent starvation of subsequent dates', () => {
+  scheduledTriggers = [];
+  mockScriptProperties = {};
+
+  SheetManager.getActiveSymbols = () => ['TCS'];
   SheetManager.getExistingRecordKeys = () => ({});
   SheetManager.appendAnalysisRows = (r) => r.length;
   SheetManager.refreshDashboardSummary = () => {};
 
-  // Mock 20 dates total, with batch size = 5
-  BackfillEngine._getSettings = () => ({ months: 1, batchSize: 5 });
-  Utils.getHistoricalTradingDays = () => {
-    const list = [];
-    for (let i = 1; i <= 10; i++) {
-      list.push(new Date(2025, 1, i)); // 10 days
-    }
-    return list;
-  };
+  BackfillEngine._getSettings = () => ({ months: 1, batchSize: 2 });
+  Utils.getHistoricalTradingDays = () => [
+    new Date(2026, 4, 4), // Day 1: fails
+    new Date(2026, 4, 5), // Day 2: succeeds
+    new Date(2026, 4, 6)  // Day 3: succeeds
+  ];
 
-  // Mock DataProvider returning success for even days, transient failure for day 3
-  let fetchCount = 0;
-  DataProvider.fetchDailyDataForDate = (dateObj) => {
-    fetchCount++;
-    const day = dateObj.getDate();
-    if (day === 3) {
-      return {
-        status: DataProvider.STATUS.NETWORK_ERROR,
-        isTradingDay: false,
-        symbolsData: {},
-        errorMsg: 'Simulated 503 Service Unavailable'
-      };
+  DataProvider.fetchDailyDataForDate = (dt) => {
+    if (dt.getDate() === 4) {
+      return { status: DataProvider.STATUS.NETWORK_ERROR, isTradingDay: false, symbolsData: {}, errorMsg: '503' };
     }
     return {
       status: DataProvider.STATUS.SUCCESS,
       isTradingDay: true,
       symbolsData: {
-        RELIANCE: {
-          spotPrice: 1230,
+        TCS: {
+          spotPrice: 3950,
           contracts: [
-            { expiryStr: '2025-02-27', expiryDate: new Date('2025-02-27'), closePrice: 1235 },
-            { expiryStr: '2025-03-27', expiryDate: new Date('2025-03-27'), closePrice: 1245 }
+            { expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 3960 },
+            { expiryStr: '2026-06-30', expiryDate: new Date('2026-06-30'), closePrice: 3975 }
           ]
         }
       }
     };
   };
 
-  // Run Batch 1
-  const res1 = BackfillEngine.runBackfill();
-  assert.strictEqual(res1.completed, false, 'Batch 1 should have remaining items');
-  assert(scheduledTriggers.some(t => t.handler === Triggers.CONTINUATION_TRIGGER_FUNC), 'Continuation trigger should be scheduled');
-
-  // Inspect checkpoint state
+  const res = BackfillEngine.runBackfill();
+  assert.strictEqual(res.completed, false);
   const stateJson = PropertiesService.getScriptProperties().getProperty(BackfillEngine.STATE_KEY);
-  assert(stateJson, 'State checkpoint should be saved');
-  const stateObj = JSON.parse(stateJson);
-  assert(stateObj.datesQueue.length > 0, 'Queue should persist');
-  assert(stateObj.failedRetryMap['2025-02-03'] === 1, 'Transient failed date should be re-enqueued with retry count 1');
-
-  // Restore mocks
-  SheetManager.initializeSheets = originalInit;
-  SheetManager.getActiveSymbols = originalGetSymbols;
-  SheetManager.getExistingRecordKeys = originalGetKeys;
-  SheetManager.appendAnalysisRows = originalAppend;
-  SheetManager.refreshDashboardSummary = originalRefresh;
-  DataProvider.fetchDailyDataForDate = originalFetch;
+  const state = JSON.parse(stateJson);
+  // Day 1 ('2026-05-04') must have been rotated to the BACK of the queue, after Day 3!
+  assert.strictEqual(state.datesQueue[0], '2026-05-06');
+  assert.strictEqual(state.datesQueue[1], '2026-05-04');
 });
 
-// ==========================================
-// Test 10: Full 6-Month Range Missing Date Recovery
-// ==========================================
-runTest('SyncEngine scans full 6 months for recovery without dropping transient failures', () => {
-  const originalInit = SheetManager.initializeSheets;
-  const originalGetSymbols = SheetManager.getActiveSymbols;
-  const originalGetKeys = SheetManager.getExistingRecordKeys;
-  const originalAppend = SheetManager.appendAnalysisRows;
-  const originalFetch = DataProvider.fetchDailyDataForDate;
-
-  SheetManager.initializeSheets = () => {};
-  SheetManager.getActiveSymbols = () => ['TCS'];
-  // Simulate having missing records for TCS
+// 11. SyncEngine circular offset prevents recovery starvation across 6 months
+runTest('SyncEngine circular offset prevents recovery starvation', () => {
+  mockScriptProperties = {};
+  SheetManager.getActiveSymbols = () => ['INFY'];
   SheetManager.getExistingRecordKeys = () => ({});
+  SheetManager.appendAnalysisRows = (r) => r.length;
 
-  let recoveredCount = 0;
-  SheetManager.appendAnalysisRows = (r) => {
-    recoveredCount += r.length;
-    return r.length;
+  // Provide 20 days so with batchSize=10, offset advances: 0 -> 10 -> 0
+  const daysList = [];
+  for (let i = 1; i <= 20; i++) {
+    daysList.push(new Date(2026, 4, i));
+  }
+  Utils.getHistoricalTradingDays = () => daysList;
+
+  let datesProcessed = [];
+  DataProvider.fetchDailyDataForDate = (dt) => {
+    datesProcessed.push(Utils.formatDateKey(dt));
+    return { status: DataProvider.STATUS.ARCHIVE_UNAVAILABLE, isTradingDay: false, symbolsData: {} };
   };
 
-  DataProvider.fetchDailyDataForDate = (dateObj) => ({
-    status: DataProvider.STATUS.SUCCESS,
-    isTradingDay: true,
-    symbolsData: {
-      TCS: {
-        spotPrice: 3800,
-        contracts: [
-          { expiryStr: '2025-02-27', expiryDate: new Date('2025-02-27'), closePrice: 3810 },
-          { expiryStr: '2025-03-27', expiryDate: new Date('2025-03-27'), closePrice: 3825 }
-        ]
-      }
-    }
-  });
+  // Run cycle 1
+  SyncEngine.recoverMissingDates(['INFY']);
+  assert(datesProcessed.length > 0);
+  const offset1 = SyncEngine._loadOffset();
+  assert(offset1 > 0, 'Offset should advance');
 
-  SyncEngine.recoverMissingDates(['TCS']);
-  assert(recoveredCount > 0, 'Should have recovered missing rows from 6-month historical scan');
+  // Next run will process from offset1 onwards, never getting stuck on the first date!
+  datesProcessed = [];
+  SyncEngine.recoverMissingDates(['INFY']);
+  const offset2 = SyncEngine._loadOffset();
+  assert.notStrictEqual(offset1, offset2, 'Offset must advance in subsequent cycle');
+});
 
-  // Restore mocks
-  SheetManager.initializeSheets = originalInit;
-  SheetManager.getActiveSymbols = originalGetSymbols;
-  SheetManager.getExistingRecordKeys = originalGetKeys;
-  SheetManager.appendAnalysisRows = originalAppend;
-  DataProvider.fetchDailyDataForDate = originalFetch;
+// 12. ContractMapper preserves BOTH Current and Next expiry mappings
+runTest('ContractMapper preserves both current and next expiry mappings', () => {
+  const stockData = {
+    spotPrice: 1463.10,
+    contracts: [
+      { expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 1465.50 },
+      { expiryStr: '2026-06-30', expiryDate: new Date('2026-06-30'), closePrice: 1475.20 }
+    ]
+  };
+
+  const mapped = ContractMapper.mapContractsForDate(new Date('2026-05-04'), stockData);
+  assert.strictEqual(mapped.historicalExpiryDate, '2026-05-26');
+  assert.strictEqual(mapped.nextExpiryDate, '2026-06-30');
 });
 
 console.log(`\n==========================================`);

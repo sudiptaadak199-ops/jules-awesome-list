@@ -5,37 +5,25 @@
  * Rules:
  * 1. Strictly official historical archives. NEVER use current prices (such as Yahoo regularMarketPrice) for past dates.
  * 2. Shared daily Bhavcopy downloaded once per date and cached in memory across symbols.
- * 3. Categorize results: SUCCESS, HOLIDAY, UNPUBLISHED, NETWORK_ERROR, PARSING_ERROR.
- * 4. Never permanently skip dates after temporary network/HTTP failures.
+ * 3. Categorize results: SUCCESS, HOLIDAY, UNPUBLISHED, NETWORK_ERROR, ARCHIVE_UNAVAILABLE, PARSING_ERROR.
+ * 4. A 404 alone must NOT prove a market holiday. It is only HOLIDAY if confirmed on a weekend or the official holiday calendar.
+ *    Otherwise, an archive 404 is classified as ARCHIVE_UNAVAILABLE (or UNPUBLISHED for today/future), and remains recoverable!
  */
 
 var DataProvider = {
-  // In-memory cache for the current script execution to prevent downloading the same date multiple times
   _dailyBhavcopyCache: {},
 
-  // Result status codes
   STATUS: {
     SUCCESS: 'SUCCESS',
-    HOLIDAY: 'HOLIDAY',                 // Confirmed non-trading day (weekend or NSE market holiday)
-    UNPUBLISHED: 'UNPUBLISHED',         // Current trading day not yet published (before ~18:00 IST)
-    NETWORK_ERROR: 'NETWORK_ERROR',     // 5xx or connection timeout / fetch failure (transient)
-    PARSING_ERROR: 'PARSING_ERROR'      // Response received but corrupted or unexpected schema
+    HOLIDAY: 'HOLIDAY',                         // Confirmed weekend or official holiday calendar date
+    UNPUBLISHED: 'UNPUBLISHED',                 // Current/future trading day not yet published
+    ARCHIVE_UNAVAILABLE: 'ARCHIVE_UNAVAILABLE', // Archive 404 on an expected trading day (recoverable!)
+    NETWORK_ERROR: 'NETWORK_ERROR',             // 5xx, connection reset, or timeout (transient recoverable)
+    PARSING_ERROR: 'PARSING_ERROR'              // Corrupt zip or invalid CSV schema (recoverable)
   },
 
   /**
    * Fetch daily Bhavcopy data for a specific date and a target list of symbols.
-   * Returns: {
-   *   dateStr: 'YYYY-MM-DD',
-   *   status: 'SUCCESS' | 'HOLIDAY' | 'UNPUBLISHED' | 'NETWORK_ERROR' | 'PARSING_ERROR',
-   *   isTradingDay: boolean,
-   *   symbolsData: {
-   *     'RELIANCE': {
-   *       spotPrice: number | null,
-   *       contracts: [ { expiryStr: 'YYYY-MM-DD', expiryDate: Date, closePrice: number, settlePrice: number, underlyingPrice: number } ]
-   *     }
-   *   },
-   *   errorMsg: string | null
-   * }
    */
   fetchDailyDataForDate: function(dateObj, targetSymbols) {
     var dateKey = Utils.formatDateKey(dateObj);
@@ -43,14 +31,27 @@ var DataProvider = {
       return this._filterForSymbols(this._dailyBhavcopyCache[dateKey], targetSymbols);
     }
 
-    // Check if weekend
+    // 1. Check if weekend (Saturday or Sunday)
     if (Utils.isWeekend(dateObj)) {
-      var holidayRes = {
+      var weekendRes = {
         dateStr: dateKey,
         status: this.STATUS.HOLIDAY,
         isTradingDay: false,
         symbolsData: {},
         errorMsg: 'Weekend (Saturday/Sunday)'
+      };
+      this._dailyBhavcopyCache[dateKey] = weekendRes;
+      return weekendRes;
+    }
+
+    // 2. Check if confirmed official NSE holiday
+    if (this._isOfficialHoliday(dateKey)) {
+      var holidayRes = {
+        dateStr: dateKey,
+        status: this.STATUS.HOLIDAY,
+        isTradingDay: false,
+        symbolsData: {},
+        errorMsg: 'Official NSE Trading Holiday (' + (CONFIG.OFFICIAL_HOLIDAYS_MAP[dateKey] || 'Confirmed Holiday') + ')'
       };
       this._dailyBhavcopyCache[dateKey] = holidayRes;
       return holidayRes;
@@ -60,7 +61,7 @@ var DataProvider = {
     var fetchStatus = this.STATUS.NETWORK_ERROR;
     var errorMsg = null;
 
-    // 1. Try NSE UDiFF FO Bhavcopy (ZIP)
+    // 3. Try NSE UDiFF FO Bhavcopy (ZIP)
     var udiffRes = this._fetchNSEUdiffFO(dateObj);
     if (udiffRes.status === this.STATUS.SUCCESS && udiffRes.data) {
       parsedData = udiffRes.data;
@@ -70,7 +71,7 @@ var DataProvider = {
       errorMsg = udiffRes.error;
     }
 
-    // 2. If UDiFF failed with 404/holiday or network error, check Legacy NSE FO Bhavcopy (for older dates)
+    // 4. If UDiFF failed with 404/unavailable, try Legacy NSE FO Bhavcopy (for older historical dates)
     if (!parsedData) {
       var legacyRes = this._fetchNSELegacyFO(dateObj);
       if (legacyRes.status === this.STATUS.SUCCESS && legacyRes.data) {
@@ -80,7 +81,7 @@ var DataProvider = {
       }
     }
 
-    // 3. If derivative data found but spot price (undrlygPric) is missing, enrich strictly from historical Cash Bhavcopy
+    // 5. If derivative data found but spot price (undrlygPric) is missing, enrich strictly from historical Cash Bhavcopy
     if (parsedData && parsedData.isTradingDay) {
       this._enrichSpotPrices(dateObj, parsedData);
     }
@@ -95,9 +96,8 @@ var DataProvider = {
         errorMsg: null
       };
     } else {
-      // Determine if it was an unpublished today or a holiday
       var isTodayOrFuture = this._isTodayOrFuture(dateObj);
-      if (fetchStatus === this.STATUS.HOLIDAY && isTodayOrFuture) {
+      if (isTodayOrFuture && (fetchStatus === this.STATUS.ARCHIVE_UNAVAILABLE || fetchStatus === this.STATUS.HOLIDAY)) {
         fetchStatus = this.STATUS.UNPUBLISHED;
       }
 
@@ -110,12 +110,17 @@ var DataProvider = {
       };
     }
 
-    // Only cache definitive results (SUCCESS or confirmed past HOLIDAY), never cache transient errors permanently
-    if (finalResult.status === this.STATUS.SUCCESS || (finalResult.status === this.STATUS.HOLIDAY && !this._isTodayOrFuture(dateObj))) {
+    // Only cache confirmed SUCCESS or confirmed official HOLIDAYS.
+    // NEVER cache ARCHIVE_UNAVAILABLE, PARSING_ERROR, or NETWORK_ERROR permanently!
+    if (finalResult.status === this.STATUS.SUCCESS || finalResult.status === this.STATUS.HOLIDAY) {
       this._dailyBhavcopyCache[dateKey] = finalResult;
     }
 
     return this._filterForSymbols(finalResult, targetSymbols);
+  },
+
+  _isOfficialHoliday: function(dateKey) {
+    return Boolean(CONFIG.OFFICIAL_HOLIDAYS_MAP && CONFIG.OFFICIAL_HOLIDAYS_MAP[dateKey]);
   },
 
   _isTodayOrFuture: function(dateObj) {
@@ -135,7 +140,6 @@ var DataProvider = {
 
     var res = this._fetchAndUnzipCsv(url);
     if (res.status !== this.STATUS.SUCCESS) {
-      // Try alt URL
       var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
       var altRes = this._fetchAndUnzipCsv(altUrl);
       if (altRes.status === this.STATUS.SUCCESS) {
@@ -193,7 +197,6 @@ var DataProvider = {
       var cols = line.split(',');
 
       var instType = (cols[colIdx.finInstrmTp] || '').trim().toUpperCase();
-      // Filter for stock futures: STF (Stock Futures in UDiFF) or FUTSTK
       if (instType !== 'STF' && instType !== 'FUTSTK') {
         continue;
       }
@@ -208,7 +211,7 @@ var DataProvider = {
 
       var closePrice = Utils.safeFloat(cols[colIdx.clsPric]);
       var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
-      var futurePrice = (closePrice !== null) ? closePrice : settlePrice;
+      var futurePrice = (closePrice !== null && closePrice > 0) ? closePrice : (settlePrice !== null && settlePrice > 0 ? settlePrice : null);
 
       var undrlygPrice = (colIdx.undrlygPric !== -1) ? Utils.safeFloat(cols[colIdx.undrlygPric]) : null;
 
@@ -311,7 +314,7 @@ var DataProvider = {
 
       var closePrice = Utils.safeFloat(cols[colIdx.close]);
       var settlePrice = (colIdx.settlePr !== -1) ? Utils.safeFloat(cols[colIdx.settlePr]) : null;
-      var futurePrice = (closePrice !== null) ? closePrice : settlePrice;
+      var futurePrice = (closePrice !== null && closePrice > 0) ? closePrice : (settlePrice !== null && settlePrice > 0 ? settlePrice : null);
 
       if (!result.symbolsData[symbol]) {
         result.symbolsData[symbol] = {
@@ -347,7 +350,6 @@ var DataProvider = {
 
     if (symbolsNeedingSpot.length === 0) return;
 
-    // Try NSE CM Sec Bhavcopy
     var ddmmyyyy = Utils.formatDDMMYYYY(dateObj);
     var cmUrl = CONFIG.URLS.NSE_CM_SEC.replace('{DDMMYYYY}', ddmmyyyy);
     var cmRes = this._fetchHttpText(cmUrl);
@@ -361,7 +363,6 @@ var DataProvider = {
       return;
     }
 
-    // If still missing, try legacy CM bhavcopy (ZIP)
     var yyyy = dateObj.getFullYear();
     var mmm = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][dateObj.getMonth()];
     var dd = ('0' + dateObj.getDate()).slice(-2);
@@ -378,9 +379,6 @@ var DataProvider = {
     }
   },
 
-  /**
-   * Parse NSE CM sec_bhavdata_full CSV and apply Spot (Close) prices for series EQ
-   */
   _parseAndApplySpotFromCmSec: function(cmText, parsedData, targetSymbols) {
     var lines = cmText.split(/\r?\n/);
     if (lines.length < 2) return;
@@ -406,16 +404,13 @@ var DataProvider = {
 
       if (targetSet[sym] && (series === 'EQ' || series === 'BE')) {
         var spot = Utils.safeFloat(cols[closeIdx]);
-        if (spot !== null && parsedData.symbolsData[sym]) {
+        if (spot !== null && spot > 0 && parsedData.symbolsData[sym]) {
           parsedData.symbolsData[sym].spotPrice = spot;
         }
       }
     }
   },
 
-  /**
-   * Parse Legacy CM bhavcopy CSV and apply Spot (Close) prices for series EQ
-   */
   _parseAndApplySpotFromLegacyCm: function(cmText, parsedData, targetSymbols) {
     var lines = cmText.split(/\r?\n/);
     if (lines.length < 2) return;
@@ -441,16 +436,13 @@ var DataProvider = {
 
       if (targetSet[sym] && (series === 'EQ' || series === 'BE')) {
         var spot = Utils.safeFloat(cols[closeIdx]);
-        if (spot !== null && parsedData.symbolsData[sym]) {
+        if (spot !== null && spot > 0 && parsedData.symbolsData[sym]) {
           parsedData.symbolsData[sym].spotPrice = spot;
         }
       }
     }
   },
 
-  /**
-   * Filter loaded daily bhavcopy to only return data for target symbols
-   */
   _filterForSymbols: function(dailyData, targetSymbols) {
     if (!targetSymbols || targetSymbols.length === 0) {
       return dailyData;
@@ -479,9 +471,6 @@ var DataProvider = {
     };
   },
 
-  /**
-   * Helper to fetch HTTP text safely (in GAS via UrlFetchApp)
-   */
   _fetchHttpText: function(url) {
     if (typeof UrlFetchApp === 'undefined') {
       return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'UrlFetchApp unavailable' };
@@ -498,7 +487,7 @@ var DataProvider = {
       if (code === 200) {
         return { status: this.STATUS.SUCCESS, text: resp.getContentText(), error: null };
       } else if (code === 404) {
-        return { status: this.STATUS.HOLIDAY, text: null, error: 'HTTP 404 Not Found' };
+        return { status: this.STATUS.ARCHIVE_UNAVAILABLE, text: null, error: 'HTTP 404 Not Found' };
       } else {
         return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'HTTP ' + code };
       }
@@ -507,9 +496,6 @@ var DataProvider = {
     }
   },
 
-  /**
-   * Helper to fetch ZIP file and extract primary CSV (in GAS via Utilities.unzip)
-   */
   _fetchAndUnzipCsv: function(url) {
     if (typeof UrlFetchApp === 'undefined' || typeof Utilities === 'undefined') {
       return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'GAS services unavailable' };
@@ -531,7 +517,8 @@ var DataProvider = {
         }
         return { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file' };
       } else if (code === 404) {
-        return { status: this.STATUS.HOLIDAY, csvText: null, error: 'HTTP 404 (Holiday or unavailable)' };
+        // Crucial: 404 alone is NOT a confirmed holiday! It is ARCHIVE_UNAVAILABLE so it remains recoverable.
+        return { status: this.STATUS.ARCHIVE_UNAVAILABLE, csvText: null, error: 'HTTP 404 Archive Unavailable' };
       } else {
         return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'HTTP ' + code };
       }

@@ -14,15 +14,15 @@
  * 9. Spot-Future Gap % = (Spot − Current Future) / Spot × 100
  * 10. Historical Expiry Date
  *
- * Safety Rule:
- * Handle zero or missing prices safely; NEVER substitute zero for missing data.
- * If denominator is zero or values are missing/null, output empty string or null.
+ * Strict Completeness Rule:
+ * A record is treated as complete ONLY when Spot, Current Future, and Next Future prices are all valid (> 0).
+ * Never permanently save incomplete records as successful.
  */
 
 var GapEngine = {
   /**
    * Calculate all gap fields given raw prices.
-   * Returns an object containing calculated values.
+   * Returns an object containing calculated values and completeness flag.
    */
   calculateGaps: function(spot, currentFuture, nextFuture) {
     var spotVal = Utils.safeFloat(spot);
@@ -35,7 +35,6 @@ var GapEngine = {
 
     if (curVal !== null && nextVal !== null) {
       curNextGap = Utils.round(curVal - nextVal, 4);
-      // Denominator check: Current Future != 0
       if (curVal !== 0) {
         curNextGapPct = Utils.round(((curVal - nextVal) / curVal) * 100, 4);
       }
@@ -47,11 +46,15 @@ var GapEngine = {
 
     if (spotVal !== null && curVal !== null) {
       spotCurGap = Utils.round(spotVal - curVal, 4);
-      // Denominator check: Spot != 0
       if (spotVal !== 0) {
         spotCurGapPct = Utils.round(((spotVal - curVal) / spotVal) * 100, 4);
       }
     }
+
+    // Strict Completeness Flag: Spot, Current Future, and Next Future must all be valid (> 0)
+    var isComplete = (spotVal !== null && spotVal > 0) &&
+                     (curVal !== null && curVal > 0) &&
+                     (nextVal !== null && nextVal > 0);
 
     return {
       spotPrice: spotVal,
@@ -60,16 +63,13 @@ var GapEngine = {
       currentNextGap: curNextGap,
       currentNextGapPct: curNextGapPct,
       spotCurrentFutureGap: spotCurGap,
-      spotFutureGapPct: spotCurGapPct
+      spotFutureGapPct: spotCurGapPct,
+      isComplete: isComplete
     };
   },
 
   /**
    * Build the exact 10-column row array for 'Futures Gap Analysis' sheet.
-   *
-   * Columns:
-   * [Date, Symbol, Spot Price, Current Future Price, Next Future Price,
-   *  Current−Next Gap, Current−Next Gap %, Spot−Current Future Gap, Spot-Future Gap %, Historical Expiry Date]
    */
   buildAnalysisRow: function(dateStr, symbol, spot, currentFuture, nextFuture, histExpiryDate) {
     var gaps = this.calculateGaps(spot, currentFuture, nextFuture);

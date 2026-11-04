@@ -1,15 +1,16 @@
 /**
  * SA Automatic Futures Gap Analysis System
  * SyncEngine.gs - Automatic symbol change detection, daily EOD update, 6-month missing dates recovery, and duplicate prevention.
+ *
+ * Rules:
+ * 1. Strict completeness: ONLY valid complete records (Spot > 0, CurFut > 0, NxtFut > 0) are saved.
+ * 2. Recovery batch starvation prevention: rotates failed dates to the back of the queue and uses a sliding offset so earlier failing dates never block later missing dates from being recovered.
+ * 3. Differentiates holidays from archive 404/unavailable dates.
  */
 
 var SyncEngine = {
-  /**
-   * Run synchronization cycle:
-   * 1. Detect if user added new symbols or modified existing symbols.
-   * 2. Perform daily EOD update for today / latest trading day.
-   * 3. Check for any missing historical dates across the full configured 6-month period and recover them.
-   */
+  RECOVERY_OFFSET_KEY: 'RECOVERY_OFFSET',
+
   syncAll: function() {
     SheetManager.initializeSheets();
     var activeSymbols = SheetManager.getActiveSymbols();
@@ -25,17 +26,13 @@ var SyncEngine = {
     // 2. Perform daily update for today/latest trading day
     this.runDailyUpdate(activeSymbols);
 
-    // 3. Scan and recover missing dates across full 6 months
+    // 3. Scan and recover missing dates across full 6 months with starvation prevention
     this.recoverMissingDates(activeSymbols);
 
     // Refresh dashboard overview
     SheetManager.refreshDashboardSummary();
   },
 
-  /**
-   * Detect symbols in 'Symbols' sheet that have zero historical records in 'Futures Gap Analysis'
-   * and automatically trigger backfill for them.
-   */
   detectAndBackfillNewSymbols: function(activeSymbols) {
     var existingKeys = SheetManager.getExistingRecordKeys();
     var symbolsWithData = {};
@@ -62,15 +59,12 @@ var SyncEngine = {
     }
   },
 
-  /**
-   * Perform daily update for today (or last trading day if today is weekend / after hours).
-   */
   runDailyUpdate: function(activeSymbols) {
     var today = new Date();
     var targetDate = new Date(today);
-    if (targetDate.getDay() === 0) { // Sunday -> Friday
+    if (targetDate.getDay() === 0) {
       targetDate.setDate(targetDate.getDate() - 2);
-    } else if (targetDate.getDay() === 6) { // Saturday -> Friday
+    } else if (targetDate.getDay() === 6) {
       targetDate.setDate(targetDate.getDate() - 1);
     }
 
@@ -103,7 +97,7 @@ var SyncEngine = {
     var dailyData = DataProvider.fetchDailyDataForDate(targetDate, symbolsToUpdate);
 
     if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
-      SheetManager.log('INFO', 'DailyUpdate', dateStr + ' is a confirmed holiday/non-trading day.');
+      SheetManager.log('INFO', 'DailyUpdate', dateStr + ' is a confirmed holiday/weekend.');
       return;
     }
 
@@ -112,8 +106,8 @@ var SyncEngine = {
       return;
     }
 
-    if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR) {
-      SheetManager.log('WARN', 'DailyUpdate', 'Network error fetching ' + dateStr + ': ' + dailyData.errorMsg + '. Will be recovered in next run.');
+    if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR || dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE) {
+      SheetManager.log('WARN', 'DailyUpdate', 'Archive issue for ' + dateStr + ': ' + dailyData.errorMsg + '. Will be recovered in next run.');
       return;
     }
 
@@ -126,17 +120,17 @@ var SyncEngine = {
     for (var j = 0; j < symbolsToUpdate.length; j++) {
       var symbol = symbolsToUpdate[j];
       var stockData = dailyData.symbolsData[symbol];
-      if (!stockData) {
-        continue;
-      }
+      if (!stockData) continue;
 
       var mapped = ContractMapper.mapContractsForDate(targetDate, stockData);
-      if (!mapped.currentContract) {
+      // STRICT COMPLETENESS
+      if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0) {
+        SheetManager.log('WARN', 'DailyUpdate', 'Incomplete data for ' + symbol + ' on ' + dateStr + '. Not saving.');
         continue;
       }
 
       var curPrice = mapped.currentContract.closePrice;
-      var nextPrice = mapped.nextContract ? mapped.nextContract.closePrice : null;
+      var nextPrice = mapped.nextContract.closePrice;
       var spot = mapped.spotPrice;
       var histExpiry = mapped.historicalExpiryDate;
 
@@ -150,16 +144,17 @@ var SyncEngine = {
 
     if (rowsToAdd.length > 0) {
       SheetManager.appendAnalysisRows(rowsToAdd);
-      SheetManager.log('SUCCESS', 'DailyUpdate', 'Appended ' + rowsToAdd.length + ' daily records for ' + dateStr);
+      SheetManager.log('SUCCESS', 'DailyUpdate', 'Appended ' + rowsToAdd.length + ' complete daily records for ' + dateStr);
     }
   },
 
   /**
    * Scan past trading days across the entire configured 6-month history (~125-130 trading days)
    * to detect and safely recover any missing dates.
+   * STARVATION-FREE: Uses a rotating offset so early failing dates do not prevent subsequent missing dates
+   * from being processed.
    */
   recoverMissingDates: function(activeSymbols) {
-    // Scan full 6-month historical window
     var tradingDays = Utils.getHistoricalTradingDays(6);
     var existingKeys = SheetManager.getExistingRecordKeys();
 
@@ -188,12 +183,29 @@ var SyncEngine = {
     }
 
     if (missingDays.length === 0) {
+      this._saveOffset(0);
       return;
     }
 
-    SheetManager.log('INFO', 'Recovery', 'Found ' + missingDays.length + ' missing historical dates across 6 months. Processing recovery batch.');
-    // Process up to 10 missing dates per run to stay well within GAS execution limits
-    var recoveryBatch = missingDays.slice(0, 10);
+    SheetManager.log('INFO', 'Recovery', 'Found ' + missingDays.length + ' missing historical dates across 6 months.');
+
+    // Starvation Prevention: Read previous offset and slice batch with circular wrap-around
+    var offset = this._loadOffset();
+    if (offset >= missingDays.length) {
+      offset = 0;
+    }
+
+    var batchSize = 10;
+    var recoveryBatch = [];
+    for (var b = 0; b < batchSize && b < missingDays.length; b++) {
+      var idx = (offset + b) % missingDays.length;
+      recoveryBatch.push(missingDays[idx]);
+    }
+
+    // Save next offset for the following cycle
+    var nextOffset = (offset + recoveryBatch.length) % missingDays.length;
+    this._saveOffset(nextOffset);
+
     var recoveredRows = [];
 
     for (var m = 0; m < recoveryBatch.length; m++) {
@@ -201,13 +213,14 @@ var SyncEngine = {
       var mDateStr = Utils.formatDateKey(mDate);
       var dailyData = DataProvider.fetchDailyDataForDate(mDate, activeSymbols);
 
-      // Distinguish holidays vs transient errors
       if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
-        // Legitimate holiday, nothing to recover
         continue;
       }
-      if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR || dailyData.status === DataProvider.STATUS.UNPUBLISHED) {
-        SheetManager.log('WARN', 'Recovery', 'Transient error recovering ' + mDateStr + ' (' + dailyData.errorMsg + '). Kept in recovery queue.');
+      if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR ||
+          dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE ||
+          dailyData.status === DataProvider.STATUS.UNPUBLISHED ||
+          dailyData.status === DataProvider.STATUS.PARSING_ERROR) {
+        SheetManager.log('WARN', 'Recovery', 'Temporary error recovering ' + mDateStr + ' (' + dailyData.status + ': ' + dailyData.errorMsg + '). Kept in queue.');
         continue;
       }
 
@@ -221,10 +234,13 @@ var SyncEngine = {
         if (!sData) continue;
 
         var mapped = ContractMapper.mapContractsForDate(mDate, sData);
-        if (!mapped.currentContract) continue;
+        // STRICT COMPLETENESS
+        if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0) {
+          continue;
+        }
 
         var cur = mapped.currentContract.closePrice;
-        var nxt = mapped.nextContract ? mapped.nextContract.closePrice : null;
+        var nxt = mapped.nextContract.closePrice;
         var sp = mapped.spotPrice;
         var exp = mapped.historicalExpiryDate;
 
@@ -239,7 +255,26 @@ var SyncEngine = {
 
     if (recoveredRows.length > 0) {
       SheetManager.appendAnalysisRows(recoveredRows);
-      SheetManager.log('SUCCESS', 'Recovery', 'Successfully recovered ' + recoveredRows.length + ' missing historical records across 6 months.');
+      SheetManager.log('SUCCESS', 'Recovery', 'Successfully recovered ' + recoveredRows.length + ' complete historical records across 6 months.');
+    }
+  },
+
+  _loadOffset: function() {
+    if (typeof PropertiesService === 'undefined') return 0;
+    try {
+      var val = PropertiesService.getScriptProperties().getProperty(this.RECOVERY_OFFSET_KEY);
+      return val ? parseInt(val, 10) : 0;
+    } catch (e) {
+      return 0;
+    }
+  },
+
+  _saveOffset: function(offset) {
+    if (typeof PropertiesService === 'undefined') return;
+    try {
+      PropertiesService.getScriptProperties().setProperty(this.RECOVERY_OFFSET_KEY, String(offset));
+    } catch (e) {
+      // Ignore
     }
   }
 };

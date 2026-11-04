@@ -5,7 +5,7 @@
 
 var CONFIG = {
   PROJECT_NAME: 'SA Futures Gap System',
-  VERSION: '1.1.0',
+  VERSION: '1.2.0',
   TIMEZONE: 'Asia/Kolkata',
 
   // Sheet Names
@@ -63,7 +63,37 @@ var CONFIG = {
     // NSE CM Bhavcopy (Cash market / Spot fallback if UDiFF UndrlygPric missing)
     NSE_CM_SEC: 'https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
     NSE_CM_SEC_ALT: 'https://archives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
-    NSE_LEGACY_CM: 'https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip'
+    NSE_LEGACY_CM: 'https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip',
+
+    // Official NSE Holiday Calendar API
+    NSE_HOLIDAY_MASTER: 'https://www.nseindia.com/api/holiday-master?type=trading'
+  },
+
+  // Known official NSE trading holidays (Calendar master)
+  // Ensures archive 404s on non-holidays are treated as transient archive errors, NOT false holidays!
+  OFFICIAL_HOLIDAYS_MAP: {
+    '2026-01-15': 'Municipal Corporation Election',
+    '2026-01-26': 'Republic Day',
+    '2026-02-15': 'Mahashivratri',
+    '2026-03-03': 'Holi',
+    '2026-03-21': 'Id-Ul-Fitr',
+    '2026-03-26': 'Shri Ram Navami',
+    '2026-03-31': 'Shri Mahavir Jayanti',
+    '2026-04-03': 'Good Friday',
+    '2026-04-14': 'Dr. Ambedkar Jayanti',
+    '2026-05-01': 'Maharashtra Day',
+    '2026-05-28': 'Bakri Id',
+    '2026-06-26': 'Muharram',
+    '2026-08-15': 'Independence Day',
+    '2026-09-14': 'Ganesh Chaturthi',
+    '2026-10-02': 'Mahatma Gandhi Jayanti',
+    '2026-10-20': 'Dussehra',
+    '2026-11-08': 'Diwali Laxmi Pujan*',
+    '2026-11-10': 'Diwali-Balipratipada',
+    '2026-11-24': 'Guru Nanak Jayanti',
+    '2026-12-25': 'Christmas',
+    // 2024 & 2025 known dates
+    '2024-11-20': 'Maharashtra Assembly Election'
   },
 
   // Color Palette ('Cool Tech' Professional Theme)

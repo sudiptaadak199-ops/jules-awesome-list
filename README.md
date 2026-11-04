@@ -24,7 +24,6 @@
 - [Context](#context)
 - [Fun \& Experimental](#fun--experimental)
 - [Start from Scratch](#start-from-scratch)
-- [Financial & Market Systems](#financial--market-systems)
 - [Contributing](#contributing)
 
 ---
@@ -209,13 +208,6 @@
 
 - `// I want to build a web scraper—start me off`
   <sub>Data scraping or automation tools using Python/Node.</sub>
-
-
-
-## Financial & Market Systems
-
-- `// Build a fast, lightweight, fully automated Google Sheets + Google Apps Script system for NSE stock futures gap analysis...`
-  <sub>Automated derivative analytics, historical Bhavcopy processing, and contract rollover mapping.</sub>
 
 
 

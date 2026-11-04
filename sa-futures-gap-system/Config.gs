@@ -5,19 +5,20 @@
 
 var CONFIG = {
   PROJECT_NAME: 'SA Futures Gap System',
-  VERSION: '1.2.0',
+  VERSION: '1.3.0',
   TIMEZONE: 'Asia/Kolkata',
 
   // Sheet Names
   SHEETS: {
     SYMBOLS: 'Symbols',
     GAP_ANALYSIS: 'Futures Gap Analysis',
+    CONTRACT_MAPPING: 'Contract_Mapping', // Hidden dual-contract mapping sheet
     DASHBOARD: 'Dashboard',
     SETTINGS: 'Settings',
     LOGS: 'Logs'
   },
 
-  // Required 10 Columns for 'Futures Gap Analysis' tab
+  // Required 10 Columns for 'Futures Gap Analysis' tab (UNCHANGED)
   GAP_ANALYSIS_COLUMNS: [
     'Date',
     'Symbol',
@@ -29,6 +30,20 @@ var CONFIG = {
     'Spot−Current Future Gap',
     'Spot-Future Gap %',
     'Historical Expiry Date'
+  ],
+
+  // Required 10 Columns for 'Contract_Mapping' tab
+  CONTRACT_MAPPING_COLUMNS: [
+    'Date',
+    'Symbol',
+    'Current Contract Symbol',
+    'Current Expiry Date',
+    'Next Contract Symbol',
+    'Next Expiry Date',
+    'Current Futures Price',
+    'Next Futures Price',
+    'Last Updated',
+    'Data Status'
   ],
 
   // Default initial symbols if user sheet is empty
@@ -51,26 +66,18 @@ var CONFIG = {
     ['MAX_LOG_ROWS', 1000, 'Maximum log rows to retain in Logs sheet']
   ],
 
-  // Free Data Sources URLs (Strictly official historical archives - no current price fallbacks for past dates)
+  // Free Data Sources URLs
   URLS: {
-    // Modern NSE UDiFF FO Bhavcopy (ZIP)
     NSE_UDIFF_FO: 'https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip',
     NSE_UDIFF_FO_ALT: 'https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip',
-
-    // Legacy NSE FO Bhavcopy (ZIP)
     NSE_LEGACY_FO: 'https://archives.nseindia.com/content/historical/DERIVATIVES/{YYYY}/{MMM}/fo{DD}{MMM}{YYYY}bhav.csv.zip',
-
-    // NSE CM Bhavcopy (Cash market / Spot fallback if UDiFF UndrlygPric missing)
     NSE_CM_SEC: 'https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
     NSE_CM_SEC_ALT: 'https://archives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv',
     NSE_LEGACY_CM: 'https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip',
-
-    // Official NSE Holiday Calendar API
     NSE_HOLIDAY_MASTER: 'https://www.nseindia.com/api/holiday-master?type=trading'
   },
 
   // Known official NSE trading holidays (Calendar master)
-  // Ensures archive 404s on non-holidays are treated as transient archive errors, NOT false holidays!
   OFFICIAL_HOLIDAYS_MAP: {
     '2026-01-15': 'Municipal Corporation Election',
     '2026-01-26': 'Republic Day',
@@ -92,20 +99,18 @@ var CONFIG = {
     '2026-11-10': 'Diwali-Balipratipada',
     '2026-11-24': 'Guru Nanak Jayanti',
     '2026-12-25': 'Christmas',
-    // 2024 & 2025 known dates
     '2024-11-20': 'Maharashtra Assembly Election'
   },
 
-  // Color Palette ('Cool Tech' Professional Theme)
   COLORS: {
-    HEADER_BG: '#1e293b',         // Slate 800
+    HEADER_BG: '#1e293b',
     HEADER_FG: '#ffffff',
-    ROW_ALT: '#f8fafc',           // Slate 50
-    BORDER: '#e2e8f0',            // Slate 200
-    ACCENT_BLUE: '#2563eb',       // Blue 600
-    SUCCESS_GREEN: '#16a34a',     // Green 600
-    WARNING_AMBER: '#d97706',     // Amber 600
-    DANGER_RED: '#dc2626',        // Red 600
+    ROW_ALT: '#f8fafc',
+    BORDER: '#e2e8f0',
+    ACCENT_BLUE: '#2563eb',
+    SUCCESS_GREEN: '#16a34a',
+    WARNING_AMBER: '#d97706',
+    DANGER_RED: '#dc2626',
     CARD_BG: '#ffffff',
     TEXT_MUTED: '#64748b'
   }

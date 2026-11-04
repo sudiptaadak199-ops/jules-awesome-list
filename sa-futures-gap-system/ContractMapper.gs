@@ -6,7 +6,8 @@
  * Rules:
  * 1. Filter available contracts where expiryDate >= tradeDate (unexpired contracts).
  * 2. Reject contracts with missing, zero, or invalid closing prices BEFORE sorting/selecting.
- * 3. Preserve BOTH Current Contract Expiry and Next Contract Expiry mappings for historical precision.
+ * 3. Capture real contract symbols (FinInstrmNm or ticker contract code).
+ * 4. Preserve BOTH Current Contract Expiry and Next Contract Expiry mappings for permanent dual mapping.
  */
 
 var ContractMapper = {
@@ -14,11 +15,13 @@ var ContractMapper = {
    * Determine Current Future and Next Future contract for a given stock symbol on a specific date.
    *
    * Returns: {
-   *   currentContract: { expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
-   *   nextContract: { expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
+   *   currentContract: { contractSymbol, expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
+   *   nextContract: { contractSymbol, expiryStr, expiryDate, closePrice, settlePrice, underlyingPrice } | null,
    *   spotPrice: number | null,
    *   historicalExpiryDate: string (YYYY-MM-DD) | null,
-   *   nextExpiryDate: string (YYYY-MM-DD) | null
+   *   nextExpiryDate: string (YYYY-MM-DD) | null,
+   *   currentContractSymbol: string | null,
+   *   nextContractSymbol: string | null
    * }
    */
   mapContractsForDate: function(tradeDate, stockData) {
@@ -28,20 +31,27 @@ var ContractMapper = {
         nextContract: null,
         spotPrice: stockData ? stockData.spotPrice : null,
         historicalExpiryDate: null,
-        nextExpiryDate: null
+        nextExpiryDate: null,
+        currentContractSymbol: null,
+        nextContractSymbol: null
       };
     }
 
     var tradeDateObj = (tradeDate instanceof Date) ? tradeDate : Utils.parseDate(tradeDate);
     if (!tradeDateObj) {
-      return { currentContract: null, nextContract: null, spotPrice: null, historicalExpiryDate: null, nextExpiryDate: null };
+      return {
+        currentContract: null,
+        nextContract: null,
+        spotPrice: null,
+        historicalExpiryDate: null,
+        nextExpiryDate: null,
+        currentContractSymbol: null,
+        nextContractSymbol: null
+      };
     }
 
     var tradeMidnight = new Date(tradeDateObj.getFullYear(), tradeDateObj.getMonth(), tradeDateObj.getDate());
 
-    // Filter valid contracts:
-    // - Must have valid expiryDate >= tradeMidnight
-    // - Must have a valid positive closing/settle price (reject zero, negative, or missing prices)
     var validContracts = [];
     var seenExpiries = {};
 
@@ -52,22 +62,22 @@ var ContractMapper = {
 
       var expMidnight = new Date(expDate.getFullYear(), expDate.getMonth(), expDate.getDate());
       if (expMidnight < tradeMidnight) {
-        continue; // Expired contract
+        continue; // Expired
       }
 
-      // Validate price: must have valid positive price (> 0)
       var price = (c.closePrice !== null && c.closePrice !== undefined && c.closePrice > 0)
         ? c.closePrice
         : ((c.settlePrice !== null && c.settlePrice !== undefined && c.settlePrice > 0) ? c.settlePrice : null);
 
       if (price === null || price <= 0) {
-        continue; // REJECT contracts with zero, negative, or missing price!
+        continue; // Reject missing/zero/invalid prices
       }
 
       var expKey = c.expiryStr || Utils.formatDateKey(expDate);
       if (!seenExpiries[expKey]) {
         seenExpiries[expKey] = true;
         validContracts.push({
+          contractSymbol: c.contractSymbol || (c.symbol ? c.symbol + '_' + expKey : ''),
           expiryStr: expKey,
           expiryDate: expDate,
           closePrice: price,
@@ -77,7 +87,7 @@ var ContractMapper = {
       }
     }
 
-    // Sort ascending by expiry date (earliest unexpired contract first)
+    // Sort ascending by expiry date
     validContracts.sort(function(a, b) {
       return a.expiryDate.getTime() - b.expiryDate.getTime();
     });
@@ -88,6 +98,9 @@ var ContractMapper = {
     var histExpiryDate = current ? Utils.formatDateKey(current.expiryDate) : null;
     var nextExpiryDate = next ? Utils.formatDateKey(next.expiryDate) : null;
 
+    var curContractSymbol = current ? current.contractSymbol : null;
+    var nextContractSymbol = next ? next.contractSymbol : null;
+
     var resolvedSpot = (stockData.spotPrice !== null && stockData.spotPrice !== undefined && stockData.spotPrice > 0)
       ? stockData.spotPrice
       : (current && current.underlyingPrice !== null && current.underlyingPrice > 0 ? current.underlyingPrice : null);
@@ -97,7 +110,9 @@ var ContractMapper = {
       nextContract: next,
       spotPrice: resolvedSpot,
       historicalExpiryDate: histExpiryDate,
-      nextExpiryDate: nextExpiryDate
+      nextExpiryDate: nextExpiryDate,
+      currentContractSymbol: curContractSymbol,
+      nextContractSymbol: nextContractSymbol
     };
   }
 };

@@ -16,20 +16,15 @@
  *
  * Strict Completeness Rule:
  * A record is treated as complete ONLY when Spot, Current Future, and Next Future prices are all valid (> 0).
- * Never permanently save incomplete records as successful.
+ * Incomplete records are rejected and never saved.
  */
 
 var GapEngine = {
-  /**
-   * Calculate all gap fields given raw prices.
-   * Returns an object containing calculated values and completeness flag.
-   */
   calculateGaps: function(spot, currentFuture, nextFuture) {
     var spotVal = Utils.safeFloat(spot);
     var curVal = Utils.safeFloat(currentFuture);
     var nextVal = Utils.safeFloat(nextFuture);
 
-    // Current - Next Gap = Current Future - Next Future
     var curNextGap = null;
     var curNextGapPct = null;
 
@@ -40,7 +35,6 @@ var GapEngine = {
       }
     }
 
-    // Spot - Current Future Gap = Spot - Current Future
     var spotCurGap = null;
     var spotCurGapPct = null;
 
@@ -51,7 +45,6 @@ var GapEngine = {
       }
     }
 
-    // Strict Completeness Flag: Spot, Current Future, and Next Future must all be valid (> 0)
     var isComplete = (spotVal !== null && spotVal > 0) &&
                      (curVal !== null && curVal > 0) &&
                      (nextVal !== null && nextVal > 0);
@@ -69,7 +62,7 @@ var GapEngine = {
   },
 
   /**
-   * Build the exact 10-column row array for 'Futures Gap Analysis' sheet.
+   * Build the exact 10-column row array for 'Futures Gap Analysis' sheet (UNCHANGED).
    */
   buildAnalysisRow: function(dateStr, symbol, spot, currentFuture, nextFuture, histExpiryDate) {
     var gaps = this.calculateGaps(spot, currentFuture, nextFuture);
@@ -85,6 +78,35 @@ var GapEngine = {
       gaps.spotCurrentFutureGap !== null ? gaps.spotCurrentFutureGap : '',
       gaps.spotFutureGapPct !== null ? gaps.spotFutureGapPct : '',
       histExpiryDate || ''
+    ];
+  },
+
+  /**
+   * Build the exact 10-column row array for 'Contract_Mapping' sheet.
+   * Columns:
+   * 1. Date
+   * 2. Symbol
+   * 3. Current Contract Symbol
+   * 4. Current Expiry Date
+   * 5. Next Contract Symbol
+   * 6. Next Expiry Date
+   * 7. Current Futures Price
+   * 8. Next Futures Price
+   * 9. Last Updated
+   * 10. Data Status
+   */
+  buildMappingRow: function(dateStr, symbol, curContractSymbol, curExpiryDate, nextContractSymbol, nextExpiryDate, curPrice, nextPrice, dataStatus) {
+    return [
+      dateStr,
+      symbol,
+      curContractSymbol || '',
+      curExpiryDate || '',
+      nextContractSymbol || '',
+      nextExpiryDate || '',
+      curPrice !== null && curPrice !== undefined ? curPrice : '',
+      nextPrice !== null && nextPrice !== undefined ? nextPrice : '',
+      new Date().toISOString(),
+      dataStatus || 'COMPLETE'
     ];
   }
 };

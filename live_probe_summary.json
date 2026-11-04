@@ -1,0 +1,76 @@
+{
+  "probe_start_date": "2026-05-04",
+  "probe_end_date": "2026-11-04",
+  "target_symbols": [
+    "RELIANCE",
+    "TCS",
+    "INFY",
+    "HDFCBANK",
+    "ICICIBANK"
+  ],
+  "total_weekdays_evaluated": 133,
+  "confirmed_holidays_count": 5,
+  "expected_trading_days_count": 128,
+  "downloaded_archives_count": 128,
+  "unavailable_archive_dates_count": 0,
+  "total_potential_symbol_records": 640,
+  "complete_records_count": 640,
+  "incomplete_records_count": 0,
+  "failed_records_count": 0,
+  "historical_coverage_percentage": 100,
+  "symbol_breakdown": {
+    "RELIANCE": {
+      "complete": 128,
+      "incomplete": 0,
+      "failed": 0,
+      "coverage_percentage": 100
+    },
+    "TCS": {
+      "complete": 128,
+      "incomplete": 0,
+      "failed": 0,
+      "coverage_percentage": 100
+    },
+    "INFY": {
+      "complete": 128,
+      "incomplete": 0,
+      "failed": 0,
+      "coverage_percentage": 100
+    },
+    "HDFCBANK": {
+      "complete": 128,
+      "incomplete": 0,
+      "failed": 0,
+      "coverage_percentage": 100
+    },
+    "ICICIBANK": {
+      "complete": 128,
+      "incomplete": 0,
+      "failed": 0,
+      "coverage_percentage": 100
+    }
+  },
+  "confirmed_holidays_list": [
+    {
+      "date": "2026-05-28",
+      "description": "Bakri Id"
+    },
+    {
+      "date": "2026-06-26",
+      "description": "Muharram"
+    },
+    {
+      "date": "2026-09-14",
+      "description": "Ganesh Chaturthi"
+    },
+    {
+      "date": "2026-10-02",
+      "description": "Mahatma Gandhi Jayanti"
+    },
+    {
+      "date": "2026-10-20",
+      "description": "Dussehra"
+    }
+  ],
+  "unavailable_archive_dates_list": []
+}

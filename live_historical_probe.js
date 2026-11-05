@@ -5,6 +5,11 @@
  * 6-month period (May 4, 2026 – November 4, 2026) across target symbols:
  * RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK.
  *
+ * Strict Validation Rules:
+ * 1. ClsPric only - Never substitute SttlmPric. If ClsPric is missing or <= 0, closePrice is null.
+ * 2. FinInstrmNm only - Never guess or generate fake symbols like `${sym}_FUT`. Never substitute FinInstrmId.
+ * 3. Exact matching with production DataProvider and ContractMapper.
+ *
  * Outputs:
  * - live_probe_results.csv
  * - live_probe_summary.json
@@ -84,14 +89,11 @@ function fetchBuffer(url) {
   });
 }
 
-/**
- * Minimal unzipper for single-file ZIP archives
- */
 function unzipBuffer(zipBuf) {
   try {
     let offset = 0;
     while (offset < zipBuf.length - 4) {
-      if (zipBuf.readUInt32LE(offset) === 0x04034b50) { // Local file header signature
+      if (zipBuf.readUInt32LE(offset) === 0x04034b50) {
         const compressionMethod = zipBuf.readUInt16LE(offset + 8);
         const compressedSize = zipBuf.readUInt32LE(offset + 18);
         const fileNameLen = zipBuf.readUInt16LE(offset + 26);
@@ -99,9 +101,9 @@ function unzipBuffer(zipBuf) {
         const dataOffset = offset + 30 + fileNameLen + extraFieldLen;
 
         const compData = zipBuf.slice(dataOffset, dataOffset + compressedSize);
-        if (compressionMethod === 8) { // Deflate
+        if (compressionMethod === 8) {
           return zlib.inflateRawSync(compData).toString('utf-8');
-        } else if (compressionMethod === 0) { // Stored
+        } else if (compressionMethod === 0) {
           return compData.toString('utf-8');
         }
       }
@@ -123,6 +125,7 @@ function parseUdiffFOCsv(csvText) {
     tckrSymb: headers.indexOf('TckrSymb'),
     finInstrmTp: headers.indexOf('FinInstrmTp'),
     finInstrmNm: headers.indexOf('FinInstrmNm'),
+    finInstrmId: headers.indexOf('FinInstrmId'),
     xpryDt: headers.indexOf('XpryDt'),
     actlXpryDt: headers.indexOf('FininstrmActlXpryDt'),
     clsPric: headers.indexOf('ClsPric'),
@@ -143,17 +146,31 @@ function parseUdiffFOCsv(csvText) {
     const sym = (cols[colIdx.tckrSymb] || '').toUpperCase();
     if (!contractsBySymbol[sym]) continue;
 
-    const contractNm = (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) ? cols[colIdx.finInstrmNm] : `${sym}_FUT`;
-    const expStr = (colIdx.actlXpryDt !== -1 && cols[colIdx.actlXpryDt]) ? cols[colIdx.actlXpryDt] : cols[colIdx.xpryDt];
-    const cls = parseFloat(cols[colIdx.clsPric]) || null;
-    const sttl = parseFloat(cols[colIdx.sttlmPric]) || null;
-    const spot = parseFloat(cols[colIdx.undrlygPric]) || null;
+    // Strictly extract FinInstrmNm ONLY. Never guess or synthesize symbols!
+    const contractNm = (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) ? cols[colIdx.finInstrmNm].trim() : '';
+    const instrumentId = (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) ? cols[colIdx.finInstrmId].trim() : '';
+
+    if (!contractNm) {
+      continue; // Reject blank contract identifier
+    }
+
+    const expStr = (colIdx.actlXpryDt !== -1 && cols[colIdx.actlXpryDt]) ? cols[colIdx.actlXpryDt].trim() : cols[colIdx.xpryDt].trim();
+
+    // Strictly extract ClsPric ONLY. Never substitute SttlmPric!
+    const rawCls = parseFloat(cols[colIdx.clsPric]);
+    const cls = (!isNaN(rawCls) && rawCls > 0) ? rawCls : null;
+    const rawSttl = parseFloat(cols[colIdx.sttlmPric]);
+    const sttl = (!isNaN(rawSttl) && rawSttl > 0) ? rawSttl : null;
+    const rawSpot = parseFloat(cols[colIdx.undrlygPric]);
+    const spot = (!isNaN(rawSpot) && rawSpot > 0) ? rawSpot : null;
 
     contractsBySymbol[sym].push({
       contractSymbol: contractNm,
+      instrumentId: instrumentId,
       expiryStr: expStr,
-      closePrice: cls && cls > 0 ? cls : (sttl && sttl > 0 ? sttl : null),
+      closePrice: cls,
       settlePrice: sttl,
+      priceSource: cls !== null ? 'ClsPric' : 'NONE',
       spotPrice: spot
     });
   }
@@ -162,10 +179,10 @@ function parseUdiffFOCsv(csvText) {
 }
 
 async function runProbe() {
-  console.log('=== STARTING GENUINE LIVE HISTORICAL NSE PROBE (MAY 4 - NOV 4, 2026) ===');
+  console.log('=== STARTING STRICT GENUINE LIVE HISTORICAL NSE PROBE (MAY 4 - NOV 4, 2026) ===');
 
-  const startDate = new Date(2026, 4, 4);  // May 4, 2026
-  const endDate = new Date(2026, 10, 4);   // Nov 4, 2026
+  const startDate = new Date(2026, 4, 4);
+  const endDate = new Date(2026, 10, 4);
   const weekdays = getWeekdays(startDate, endDate);
 
   console.log(`Evaluating all ${weekdays.length} weekdays across symbols: ${SYMBOLS.join(', ')}`);
@@ -184,6 +201,9 @@ async function runProbe() {
     incomplete_records_count: 0,
     failed_records_count: 0,
     historical_coverage_percentage: 0.0,
+    price_field_used: 'ClsPric',
+    settlement_fallback_used: false,
+    synthetic_symbol_generation_used: false,
     symbol_breakdown: {},
     confirmed_holidays_list: [],
     unavailable_archive_dates_list: []
@@ -210,6 +230,7 @@ async function runProbe() {
       'Next Contract Symbol',
       'Next Expiry',
       'Data Source',
+      'Price Field Used',
       'HTTP Status',
       'Parsing Status',
       'Completeness Status'
@@ -221,7 +242,6 @@ async function runProbe() {
     const dateStr = formatDateKey(dt);
     const ymd = formatYYYYMMDD(dt);
 
-    // Check confirmed official holiday
     if (OFFICIAL_HOLIDAYS_MAP[dateStr]) {
       summary.confirmed_holidays_count++;
       summary.confirmed_holidays_list.push({ date: dateStr, description: OFFICIAL_HOLIDAYS_MAP[dateStr] });
@@ -237,6 +257,7 @@ async function runProbe() {
           '',
           '',
           'NSE UDiFF FO Archive',
+          'NONE',
           'HOLIDAY',
           'OFFICIAL_HOLIDAY',
           'CONFIRMED_HOLIDAY'
@@ -275,6 +296,7 @@ async function runProbe() {
           '',
           '',
           'NSE UDiFF FO Archive',
+          'NONE',
           res.status || 'ERROR',
           'ARCHIVE_UNAVAILABLE',
           'FAILED'
@@ -301,6 +323,7 @@ async function runProbe() {
           '',
           '',
           'NSE UDiFF FO Archive',
+          'NONE',
           200,
           'PARSING_ERROR',
           'FAILED'
@@ -314,15 +337,16 @@ async function runProbe() {
 
     SYMBOLS.forEach(sym => {
       const rawContracts = contractsBySym[sym] || [];
-      // Filter unexpired contracts with valid positive price (>0)
       const validContracts = [];
       let resolvedSpot = null;
 
       for (let c of rawContracts) {
-        if (!c.expiryStr) continue;
+        if (!c.expiryStr || !c.contractSymbol) continue;
         const expDate = new Date(c.expiryStr);
         if (isNaN(expDate.getTime())) continue;
         const expMidnight = new Date(expDate.getFullYear(), expDate.getMonth(), expDate.getDate());
+
+        // Strict ClsPric requirement: closePrice > 0
         if (expMidnight >= tradeMidnight && c.closePrice !== null && c.closePrice > 0) {
           validContracts.push({
             contractSymbol: c.contractSymbol,
@@ -336,15 +360,23 @@ async function runProbe() {
         }
       }
 
-      // Sort unexpired valid contracts ascending by expiry date
       validContracts.sort((a, b) => a.expiryDate - b.expiryDate);
 
       const curContract = validContracts.length > 0 ? validContracts[0] : null;
-      const nxtContract = validContracts.length > 1 ? validContracts[1] : null;
+      let nxtContract = null;
+      if (curContract && validContracts.length > 1) {
+        for (let k = 1; k < validContracts.length; k++) {
+          if (validContracts[k].expiryDate.getTime() > curContract.expiryDate.getTime()) {
+            nxtContract = validContracts[k];
+            break;
+          }
+        }
+      }
 
       const isComplete = (resolvedSpot !== null && resolvedSpot > 0) &&
-                         (curContract !== null && curContract.price > 0) &&
-                         (nxtContract !== null && nxtContract.price > 0);
+                         (curContract !== null && curContract.price > 0 && curContract.contractSymbol) &&
+                         (nxtContract !== null && nxtContract.price > 0 && nxtContract.contractSymbol) &&
+                         (curContract.expiryStr !== nxtContract.expiryStr);
 
       const status = isComplete ? 'COMPLETE' : (curContract || resolvedSpot ? 'INCOMPLETE' : 'FAILED');
 
@@ -370,6 +402,7 @@ async function runProbe() {
         nxtContract ? nxtContract.contractSymbol : '',
         nxtContract ? nxtContract.expiryStr : '',
         'NSE UDiFF FO Archive',
+        'ClsPric',
         200,
         'SUCCESS',
         status
@@ -392,7 +425,7 @@ async function runProbe() {
   fs.writeFileSync('live_probe_results.csv', csvRows.join('\n'));
   fs.writeFileSync('live_probe_summary.json', JSON.stringify(summary, null, 2));
 
-  console.log('\n================ LIVE PROBE RESULTS SUMMARY ================');
+  console.log('\n================ STRICT LIVE PROBE RESULTS SUMMARY ================');
   console.log(`Total Weekdays Evaluated:          ${summary.total_weekdays_evaluated}`);
   console.log(`Confirmed Official Holidays:       ${summary.confirmed_holidays_count}`);
   console.log(`Expected Trading Days:             ${summary.expected_trading_days_count}`);
@@ -402,6 +435,9 @@ async function runProbe() {
   console.log(`Successful COMPLETE Records:       ${summary.complete_records_count}`);
   console.log(`Incomplete Records:                ${summary.incomplete_records_count}`);
   console.log(`Failed Records:                    ${summary.failed_records_count}`);
+  console.log(`Price Field Used:                  ${summary.price_field_used}`);
+  console.log(`Settlement Fallback Used:          ${summary.settlement_fallback_used}`);
+  console.log(`Synthetic Symbol Generation Used:  ${summary.synthetic_symbol_generation_used}`);
   console.log(`Actual Historical Coverage:        ${summary.historical_coverage_percentage}%`);
   console.log('Saved detailed results to live_probe_results.csv and summary to live_probe_summary.json.\n');
 }

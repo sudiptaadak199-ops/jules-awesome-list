@@ -18,6 +18,9 @@
   "incomplete_records_count": 0,
   "failed_records_count": 0,
   "historical_coverage_percentage": 100,
+  "price_field_used": "ClsPric",
+  "settlement_fallback_used": false,
+  "synthetic_symbol_generation_used": false,
   "symbol_breakdown": {
     "RELIANCE": {
       "complete": 128,

@@ -199,13 +199,9 @@ var DataProvider = {
       var symbol = (cols[colIdx.tckrSymb] || '').trim().toUpperCase();
       if (!symbol) continue;
 
-      // Extract actual contract symbol from official FinInstrmNm or FinInstrmId
-      var contractSymbol = '';
-      if (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) {
-        contractSymbol = cols[colIdx.finInstrmNm].trim();
-      } else if (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) {
-        contractSymbol = cols[colIdx.finInstrmId].trim();
-      }
+      // Extract actual FinInstrmNm strictly as contractSymbol
+      var contractSymbol = (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) ? cols[colIdx.finInstrmNm].trim() : '';
+      var instrumentId = (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) ? cols[colIdx.finInstrmId].trim() : '';
 
       // Reject records with blank contract identifier
       if (!contractSymbol) {
@@ -236,7 +232,8 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol,
+        contractSymbol: contractSymbol, // actual FinInstrmNm
+        instrumentId: instrumentId,     // separate FinInstrmId
         expiryStr: expiryKey,
         expiryDate: expiryDate,
         closePrice: closePrice, // Strictly ClsPric; null if missing

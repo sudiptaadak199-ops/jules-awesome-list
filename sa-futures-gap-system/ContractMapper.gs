@@ -6,7 +6,7 @@
  * Rules:
  * 1. Filter available contracts where expiryDate >= tradeDate (unexpired contracts).
  * 2. Reject contracts with:
- *    - Blank or missing contractSymbol
+ *    - Blank, missing, or purely numeric contractSymbol (must be actual FinInstrmNm, never FinInstrmId)
  *    - Invalid or unparseable expiry dates
  *    - Zero, negative, or missing Closing Price (closePrice <= 0)
  * 3. Never substitute Settlement Price for Closing Price.
@@ -58,10 +58,15 @@ var ContractMapper = {
     for (var i = 0; i < stockData.contracts.length; i++) {
       var c = stockData.contracts[i];
 
-      // 1. Must have valid non-blank contract symbol
+      // 1. Must have valid non-blank contract symbol (actual FinInstrmNm)
       var sym = (c.contractSymbol || '').trim();
       if (!sym) {
         continue; // REJECT blank contract symbols
+      }
+
+      // Do NOT allow purely numeric IDs to be treated as contract symbols
+      if (/^\d+$/.test(sym)) {
+        continue; // REJECT FinInstrmId masquerading as contractSymbol
       }
 
       // 2. Must have valid unexpired expiryDate
@@ -77,10 +82,10 @@ var ContractMapper = {
 
       // 3. Strict Close Price rule:
       // Must have valid positive official Closing Price (> 0)
-      // NEVER silently accept Settlement Price as Closing Price!
+      // NEVER substitute Settlement Price for Closing Price!
       var closePr = Utils.safeFloat(c.closePrice);
       if (closePr === null || closePr <= 0) {
-        continue; // REJECT missing or non-positive Close Price!
+        continue; // REJECT missing or non-positive Close Price
       }
 
       var expKey = c.expiryStr || Utils.formatDateKey(expDate);
@@ -88,6 +93,7 @@ var ContractMapper = {
         seenExpiries[expKey] = true;
         validContracts.push({
           contractSymbol: sym,
+          instrumentId: c.instrumentId || '',
           expiryStr: expKey,
           expiryDate: expDate,
           closePrice: closePr,
@@ -106,7 +112,6 @@ var ContractMapper = {
     var current = validContracts.length > 0 ? validContracts[0] : null;
     var next = null;
 
-    // Find the next contract with a DISTINCT expiry date
     if (current && validContracts.length > 1) {
       for (var k = 1; k < validContracts.length; k++) {
         if (validContracts[k].expiryDate.getTime() > current.expiryDate.getTime()) {

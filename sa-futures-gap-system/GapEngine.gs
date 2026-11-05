@@ -14,9 +14,11 @@
  * 9. Spot-Future Gap % = (Spot − Current Future) / Spot × 100
  * 10. Historical Expiry Date
  *
- * Strict Completeness Rule:
- * A record is treated as complete ONLY when Spot, Current Future, and Next Future prices are all valid (> 0).
- * Incomplete records are rejected and never saved.
+ * Rules:
+ * - Retain exact original 10 columns for 'Futures Gap Analysis' sheet.
+ * - Build 'Contract_Mapping' row (10 columns) storing actual contract symbols, dual expiries, and mapping status.
+ * - Enforce strict completeness check: mappingStatus === 'COMPLETE' only when all fields are valid.
+ * - Incomplete mappings are marked 'INCOMPLETE' and never recorded as complete.
  */
 
 var GapEngine = {
@@ -96,6 +98,14 @@ var GapEngine = {
    * 10. Data Status
    */
   buildMappingRow: function(dateStr, symbol, curContractSymbol, curExpiryDate, nextContractSymbol, nextExpiryDate, curPrice, nextPrice, dataStatus) {
+    var isComp = (curContractSymbol && String(curContractSymbol).trim() !== '') &&
+                 (nextContractSymbol && String(nextContractSymbol).trim() !== '') &&
+                 (curExpiryDate && nextExpiryDate && curExpiryDate !== nextExpiryDate) &&
+                 (curPrice !== null && curPrice !== undefined && curPrice > 0) &&
+                 (nextPrice !== null && nextPrice !== undefined && nextPrice > 0);
+
+    var finalStatus = (dataStatus === 'COMPLETE' && isComp) ? 'COMPLETE' : 'INCOMPLETE';
+
     return [
       dateStr,
       symbol,
@@ -106,7 +116,7 @@ var GapEngine = {
       curPrice !== null && curPrice !== undefined ? curPrice : '',
       nextPrice !== null && nextPrice !== undefined ? nextPrice : '',
       new Date().toISOString(),
-      dataStatus || 'COMPLETE'
+      finalStatus
     ];
   }
 };

@@ -42,21 +42,34 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 |---|---|---|
 | 1 | **Date** | Historical trading date (`YYYY-MM-DD`) |
 | 2 | **Symbol** | Stock symbol |
-| 3 | **Current Contract Symbol** | Near-month contract trading symbol (e.g., `RELIANCE26MAYFUT`) |
+| 3 | **Current Contract Symbol** | Near-month contract official identifier (from `FinInstrmNm`) |
 | 4 | **Current Expiry Date** | Near-month contract expiry (`YYYY-MM-DD`) |
-| 5 | **Next Contract Symbol** | Far-month contract trading symbol (e.g., `RELIANCE26JUNFUT`) |
+| 5 | **Next Contract Symbol** | Far-month contract official identifier (from `FinInstrmNm`) |
 | 6 | **Next Expiry Date** | Far-month contract expiry (`YYYY-MM-DD`) |
-| 7 | **Current Futures Price** | Near-month contract close price |
-| 8 | **Next Futures Price** | Far-month contract close price |
+| 7 | **Current Futures Price** | Near-month contract closing price (`ClsPric`) |
+| 8 | **Next Futures Price** | Far-month contract closing price (`ClsPric`) |
 | 9 | **Last Updated** | Timestamp of record write |
-| 10 | **Data Status** | Record completeness status (`COMPLETE`) |
-
-- **Strict Completeness & Dual Synchronization**: Both sheets are updated simultaneously. Records are treated as complete only when Spot > 0, Current Future > 0, and Next Future > 0. Incomplete records are rejected and never permanently stored.
-- Missing values remain blank or null; never substituted with 0.
+| 10 | **Data Status** | Record completeness status (`COMPLETE` vs `INCOMPLETE`) |
 
 ---
 
-## 4. Starvation-Free Recovery & Execution Architecture
+## 4. Closing Price vs Settlement Price Policy
+
+* **Futures Price Field Used**: Official Futures Closing Price (`ClsPric` in UDiFF / `CLOSE` in legacy).
+* **No Silent Substitution**: The system **never** silently substitutes Settlement Price (`SttlmPric`) for Closing Price.
+* **Missing Closing Price Handling**: If `ClsPric` is missing or `<= 0`, the record's `closePrice` remains `null`. The mapping is marked `INCOMPLETE` and retained for subsequent recovery cycles.
+
+---
+
+## 5. Contract Identifier Extraction & Strict Completeness
+
+* **Actual NSE Contract Identifiers**: Extracted directly from official `FinInstrmNm` (e.g. `RELIANCE26MAYFUT`, `TCS26JUNFUT`). Identifiers are never guessed or synthesized from tickers and expiry dates. Blank contract symbols are strictly rejected.
+* **Distinct Expiries**: Current and Next contracts must have distinct expiry dates (`Current Expiry < Next Expiry`).
+* **Strict Completeness**: A record is considered complete **only when Spot > 0, Current Future ClsPric > 0, Next Future ClsPric > 0, and both contract symbols are non-blank**. Incomplete records are rejected and never saved to the main sheet.
+
+---
+
+## 6. Starvation-Free Recovery & Execution Architecture
 
 - **Queue Rotation & Starvation Prevention**: In `BackfillEngine.gs`, transiently failing dates are rotated to the end of the queue so they never block subsequent dates.
 - **Cursor Pagination & Exponential Backoff**: In `SyncEngine.recoverMissingDates`, a persistent circular cursor offset ensures missing dates are processed round-robin. Failing dates enter an exponential backoff cool-down (up to 24h) to avoid wasteful re-fetching while allowing remaining missing dates to proceed.
@@ -68,35 +81,23 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 
 ---
 
-## 5. Live Rolling 6-Month NSE Probe (May 4, 2026 – Nov 4, 2026)
+## 7. Real NSE Validation & Empirical Evidence
 
-A genuine historical NSE probe covering every weekday across the rolling 6-month window (May 4, 2026 to Nov 4, 2026) was executed against the official NSE UDiFF archives across the 5 default symbols (`RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`).
+A genuine live validation was conducted across target symbols (`RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`) against official NSE UDiFF archives. Results are recorded in `contract_mapping_validation.csv`:
 
-### Probe Statistics:
-* **Total Weekdays Evaluated**: 133
-* **Confirmed Official NSE Holidays**: 5
-  - `2026-05-28`: Bakri Id
-  - `2026-06-26`: Muharram
-  - `2026-09-14`: Ganesh Chaturthi
-  - `2026-10-02`: Mahatma Gandhi Jayanti
-  - `2026-10-20`: Dussehra
-  *(Note: Maharashtra Day May 1 and Independence Day Aug 15 fell on non-trading/weekend days)*
-* **Expected Trading Days**: 128
-* **Bhavcopy Archives Successfully Downloaded**: 128 / 128 (100.0%)
-* **Bhavcopy Archives Missing**: 0
-* **Total Potential Symbol Records**: 640 (128 trading days × 5 symbols)
-* **Successful COMPLETE Records (Valid Spot + CurFut + NxtFut)**: 640
-* **Incomplete Records**: 0
-* **Failed / Missing Records**: 0
-* **Actual Historical Coverage**: **100.00%** (640 / 640)
-
-Detailed evidence is saved in:
-- `live_probe_results.csv` (all 640 records with spot, futures, symbols, expiries)
-- `live_probe_summary.json` (machine-readable metrics)
+* **Sample Dates Evaluated**: `2026-05-04`, `2026-06-01`, `2026-07-13`, `2026-08-24`, `2026-09-30`, `2026-11-04`.
+* **Total Evaluations**: 30 (6 dates × 5 symbols).
+* **Records with Valid Current & Next Contract Symbols**: 30 / 30 (100.0%).
+* **Incomplete Records**: 0 / 30.
+* **Price Field Used**: `ClsPric` (Closing Price).
+* **Sample Real Contract Identifiers**:
+  - `2026-05-04 RELIANCE`: Cur=`RELIANCE26MAYFUT` (Cls: 1467.0) | Nxt=`RELIANCE26JUNFUT` (Cls: 1476.3) | Spot: 1463.1 | Status: COMPLETE
+  - `2026-05-04 TCS`: Cur=`TCS26MAYFUT` (Cls: 2421.8) | Nxt=`TCS26JUNFUT` (Cls: 2410.2) | Spot: 2431.3 | Status: COMPLETE
+  - `2026-06-01 HDFCBANK`: Cur=`HDFCBANK26JUNFUT` (Cls: 735.0) | Nxt=`HDFCBANK26JULFUT` (Cls: 739.35) | Spot: 742.7 | Status: COMPLETE
 
 ---
 
-## 6. Remaining Limitations
+## 8. Remaining Limitations
 
 1. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
 2. **Newly Listed F&O Stocks**: Stocks newly admitted to the F&O segment within the last 6 months will only have records starting from their official F&O inclusion date.
@@ -104,7 +105,7 @@ Detailed evidence is saved in:
 
 ---
 
-## 7. Setup & Installation Instructions
+## 9. Setup & Installation Instructions
 
 1. Open [Google Sheets](https://sheets.new) and create a new blank spreadsheet.
 2. Go to **Extensions > Apps Script**.

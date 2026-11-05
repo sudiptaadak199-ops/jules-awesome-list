@@ -6,8 +6,12 @@
  * 1. Strictly official historical archives. NEVER use current prices (such as Yahoo regularMarketPrice) for past dates.
  * 2. Shared daily Bhavcopy downloaded once per date and cached in memory across symbols.
  * 3. Categorize results: SUCCESS, HOLIDAY, UNPUBLISHED, NETWORK_ERROR, ARCHIVE_UNAVAILABLE, PARSING_ERROR.
- * 4. A 404 alone must NOT prove a market holiday. It is only HOLIDAY if confirmed on a weekend or the official holiday calendar.
- *    Otherwise, an archive 404 is classified as ARCHIVE_UNAVAILABLE (or UNPUBLISHED for today/future), and remains recoverable!
+ * 4. Contract Identifiers: Extract real contract name from FinInstrmNm (or FinInstrmId) directly.
+ *    Never guess or generate from ticker + expiry. Never accept blank contract identifiers.
+ * 5. Close Price vs Settlement Price:
+ *    Strictly prefer official Futures Closing Price (ClsPric) for gap calculations.
+ *    NEVER silently substitute Settlement Price (SttlmPric) if ClsPric is missing or <= 0.
+ *    If ClsPric is missing/invalid, closePrice is null, marking the record INCOMPLETE for recovery.
  */
 
 var DataProvider = {
@@ -15,23 +19,19 @@ var DataProvider = {
 
   STATUS: {
     SUCCESS: 'SUCCESS',
-    HOLIDAY: 'HOLIDAY',                         // Confirmed weekend or official holiday calendar date
-    UNPUBLISHED: 'UNPUBLISHED',                 // Current/future trading day not yet published
-    ARCHIVE_UNAVAILABLE: 'ARCHIVE_UNAVAILABLE', // Archive 404 on an expected trading day (recoverable!)
-    NETWORK_ERROR: 'NETWORK_ERROR',             // 5xx, connection reset, or timeout (transient recoverable)
-    PARSING_ERROR: 'PARSING_ERROR'              // Corrupt zip or invalid CSV schema (recoverable)
+    HOLIDAY: 'HOLIDAY',
+    UNPUBLISHED: 'UNPUBLISHED',
+    ARCHIVE_UNAVAILABLE: 'ARCHIVE_UNAVAILABLE',
+    NETWORK_ERROR: 'NETWORK_ERROR',
+    PARSING_ERROR: 'PARSING_ERROR'
   },
 
-  /**
-   * Fetch daily Bhavcopy data for a specific date and a target list of symbols.
-   */
   fetchDailyDataForDate: function(dateObj, targetSymbols) {
     var dateKey = Utils.formatDateKey(dateObj);
     if (this._dailyBhavcopyCache[dateKey]) {
       return this._filterForSymbols(this._dailyBhavcopyCache[dateKey], targetSymbols);
     }
 
-    // 1. Check if weekend (Saturday or Sunday)
     if (Utils.isWeekend(dateObj)) {
       var weekendRes = {
         dateStr: dateKey,
@@ -44,7 +44,6 @@ var DataProvider = {
       return weekendRes;
     }
 
-    // 2. Check if confirmed official NSE holiday
     if (this._isOfficialHoliday(dateKey)) {
       var holidayRes = {
         dateStr: dateKey,
@@ -61,7 +60,6 @@ var DataProvider = {
     var fetchStatus = this.STATUS.NETWORK_ERROR;
     var errorMsg = null;
 
-    // 3. Try NSE UDiFF FO Bhavcopy (ZIP)
     var udiffRes = this._fetchNSEUdiffFO(dateObj);
     if (udiffRes.status === this.STATUS.SUCCESS && udiffRes.data) {
       parsedData = udiffRes.data;
@@ -71,7 +69,6 @@ var DataProvider = {
       errorMsg = udiffRes.error;
     }
 
-    // 4. If UDiFF failed with 404/unavailable, try Legacy NSE FO Bhavcopy (for older historical dates)
     if (!parsedData) {
       var legacyRes = this._fetchNSELegacyFO(dateObj);
       if (legacyRes.status === this.STATUS.SUCCESS && legacyRes.data) {
@@ -81,7 +78,6 @@ var DataProvider = {
       }
     }
 
-    // 5. If derivative data found but spot price (undrlygPric) is missing, enrich strictly from historical Cash Bhavcopy
     if (parsedData && parsedData.isTradingDay) {
       this._enrichSpotPrices(dateObj, parsedData);
     }
@@ -110,8 +106,6 @@ var DataProvider = {
       };
     }
 
-    // Only cache confirmed SUCCESS or confirmed official HOLIDAYS.
-    // NEVER cache ARCHIVE_UNAVAILABLE, PARSING_ERROR, or NETWORK_ERROR permanently!
     if (finalResult.status === this.STATUS.SUCCESS || finalResult.status === this.STATUS.HOLIDAY) {
       this._dailyBhavcopyCache[dateKey] = finalResult;
     }
@@ -130,9 +124,6 @@ var DataProvider = {
     return dMidnight >= tMidnight;
   },
 
-  /**
-   * Fetch and parse NSE UDiFF FO Bhavcopy (ZIP format).
-   */
   _fetchNSEUdiffFO: function(dateObj) {
     var ymd = Utils.formatYYYYMMDD(dateObj);
     var dateKey = Utils.formatDateKey(dateObj);
@@ -161,6 +152,8 @@ var DataProvider = {
 
   /**
    * Parse CSV content of modern NSE UDiFF FO Bhavcopy.
+   * Extracts real contract symbol from FinInstrmNm (or FinInstrmId).
+   * Strictly extracts ClsPric as closePrice; never silently substitutes SttlmPric.
    */
   parseUdiffFOCsv: function(csvText, dateKey) {
     if (!csvText) return null;
@@ -174,6 +167,8 @@ var DataProvider = {
       tradDt: headers.indexOf('TradDt'),
       tckrSymb: headers.indexOf('TckrSymb'),
       finInstrmTp: headers.indexOf('FinInstrmTp'),
+      finInstrmNm: headers.indexOf('FinInstrmNm'),
+      finInstrmId: headers.indexOf('FinInstrmId'),
       xpryDt: headers.indexOf('XpryDt'),
       actlXpryDt: headers.indexOf('FininstrmActlXpryDt'),
       clsPric: headers.indexOf('ClsPric'),
@@ -204,14 +199,30 @@ var DataProvider = {
       var symbol = (cols[colIdx.tckrSymb] || '').trim().toUpperCase();
       if (!symbol) continue;
 
+      // Extract actual contract symbol from official FinInstrmNm or FinInstrmId
+      var contractSymbol = '';
+      if (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) {
+        contractSymbol = cols[colIdx.finInstrmNm].trim();
+      } else if (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) {
+        contractSymbol = cols[colIdx.finInstrmId].trim();
+      }
+
+      // Reject records with blank contract identifier
+      if (!contractSymbol) {
+        continue;
+      }
+
       var rawExpiry = (colIdx.actlXpryDt !== -1 && cols[colIdx.actlXpryDt]) ? cols[colIdx.actlXpryDt].trim() : cols[colIdx.xpryDt].trim();
       var expiryDate = Utils.parseDate(rawExpiry);
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      var closePrice = Utils.safeFloat(cols[colIdx.clsPric]);
+      // STRICT CLOSE PRICE POLICY:
+      // Prefer official Futures Closing Price (ClsPric).
+      // NEVER silently substitute Settlement Price (SttlmPric).
+      var rawClose = Utils.safeFloat(cols[colIdx.clsPric]);
+      var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
       var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
-      var futurePrice = (closePrice !== null && closePrice > 0) ? closePrice : (settlePrice !== null && settlePrice > 0 ? settlePrice : null);
 
       var undrlygPrice = (colIdx.undrlygPric !== -1) ? Utils.safeFloat(cols[colIdx.undrlygPric]) : null;
 
@@ -225,10 +236,12 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
+        contractSymbol: contractSymbol,
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: futurePrice,
+        closePrice: closePrice, // Strictly ClsPric; null if missing
         settlePrice: settlePrice,
+        priceSource: closePrice !== null ? 'ClsPric' : (settlePrice !== null ? 'SttlmPric_Only' : 'NONE'),
         underlyingPrice: undrlygPrice
       });
     }
@@ -236,9 +249,6 @@ var DataProvider = {
     return result;
   },
 
-  /**
-   * Fetch and parse Legacy NSE FO Bhavcopy (ZIP format).
-   */
   _fetchNSELegacyFO: function(dateObj) {
     var dateKey = Utils.formatDateKey(dateObj);
     var yyyy = dateObj.getFullYear();
@@ -265,9 +275,6 @@ var DataProvider = {
     return { status: this.STATUS.SUCCESS, data: parsed, error: null };
   },
 
-  /**
-   * Parse CSV content of legacy NSE FO Bhavcopy.
-   */
   parseLegacyFOCsv: function(csvText, dateKey) {
     if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
@@ -312,9 +319,12 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      var closePrice = Utils.safeFloat(cols[colIdx.close]);
+      // Official legacy contract identifier format
+      var contractSymbol = inst + '_' + symbol + '_' + rawExpiry;
+
+      var rawClose = Utils.safeFloat(cols[colIdx.close]);
+      var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
       var settlePrice = (colIdx.settlePr !== -1) ? Utils.safeFloat(cols[colIdx.settlePr]) : null;
-      var futurePrice = (closePrice !== null && closePrice > 0) ? closePrice : (settlePrice !== null && settlePrice > 0 ? settlePrice : null);
 
       if (!result.symbolsData[symbol]) {
         result.symbolsData[symbol] = {
@@ -324,10 +334,12 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
+        contractSymbol: contractSymbol,
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: futurePrice,
+        closePrice: closePrice,
         settlePrice: settlePrice,
+        priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null
       });
     }
@@ -335,9 +347,6 @@ var DataProvider = {
     return result;
   },
 
-  /**
-   * Enrich missing Spot prices using historical NSE CM / Sec Bhavcopy archives only
-   */
   _enrichSpotPrices: function(dateObj, parsedData) {
     var symbolsNeedingSpot = [];
     var symKeys = Object.keys(parsedData.symbolsData);
@@ -517,7 +526,6 @@ var DataProvider = {
         }
         return { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file' };
       } else if (code === 404) {
-        // Crucial: 404 alone is NOT a confirmed holiday! It is ARCHIVE_UNAVAILABLE so it remains recoverable.
         return { status: this.STATUS.ARCHIVE_UNAVAILABLE, csvText: null, error: 'HTTP 404 Archive Unavailable' };
       } else {
         return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'HTTP ' + code };

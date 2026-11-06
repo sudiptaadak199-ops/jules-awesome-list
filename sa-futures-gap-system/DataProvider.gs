@@ -316,8 +316,10 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      // Official legacy contract identifier format
-      var contractSymbol = inst + '_' + symbol + '_' + rawExpiry;
+      // In legacy bhavcopy, official FinInstrmNm is not provided.
+      // Do NOT synthesize fake identifiers (e.g. inst + '_' + symbol + '_' + expiry).
+      // Mark contractSymbol as '' (MISSING). ContractMapper will mark mapping as INCOMPLETE.
+      var contractSymbol = '';
 
       var rawClose = Utils.safeFloat(cols[colIdx.close]);
       var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
@@ -331,10 +333,11 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol,
+        contractSymbol: contractSymbol, // MISSING for legacy format
+        instrumentId: '',
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: closePrice,
+        closePrice: closePrice, // Strictly CLOSE price; never SETTLE_PR
         settlePrice: settlePrice,
         priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null

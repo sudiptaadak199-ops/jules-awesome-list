@@ -274,7 +274,7 @@ runTest('Probe Script and production DataProvider follow identical validation ru
 });
 
 // 10. Legacy FO
-runTest('DataProvider.parseLegacyFOCsv parses legacy Bhavcopy correctly', () => {
+runTest('DataProvider.parseLegacyFOCsv marks contractSymbol as MISSING and ContractMapper classifies as INCOMPLETE', () => {
   const legacyCsv = `INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP,
 FUTSTK,RELIANCE,30-May-2024,0,XX,2971,2984.45,2959.55,2969.5,2969.5,21811,161968.04,34923000,-649750,24-MAY-2024,
 FUTSTK,RELIANCE,27-Jun-2024,0,XX,2980,2995.00,2975.00,2985.0,2985.0,5000,40000.00,8000000,100000,24-MAY-2024,
@@ -283,7 +283,10 @@ FUTSTK,RELIANCE,27-Jun-2024,0,XX,2980,2995.00,2975.00,2985.0,2985.0,5000,40000.0
   assert(parsed.isTradingDay);
   assert(parsed.symbolsData.RELIANCE);
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts.length, 2);
-  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].contractSymbol, 'FUTSTK_RELIANCE_30-May-2024');
+  assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].contractSymbol, '', 'Legacy contractSymbol must be empty/missing without synthetic generation');
+
+  const mapped = ContractMapper.mapContractsForDate(new Date('2024-05-24'), parsed.symbolsData.RELIANCE);
+  assert.strictEqual(mapped.mappingStatus, 'INCOMPLETE', 'Legacy record lacking FinInstrmNm must NOT become COMPLETE');
 });
 
 // 11. ContractMapper - zero/invalid price rejection

@@ -14,7 +14,7 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 ## 2. Free Data Sources & Historical Integrity
 
 * **Primary Modern FO Data**: Official NSE UDiFF FO Bhavcopy (`BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip`) from official archives.
-* **Legacy FO Data**: Official historical NSE derivatives bhavcopy (`foDDMMMYYYYbhav.csv.zip`) for dates prior to the UDiFF migration.
+* **Legacy FO Data**: Official historical NSE derivatives bhavcopy (`foDDMMMYYYYbhav.csv.zip`). Note: Because legacy Bhavcopy files do not contain the official contract identifier (`FinInstrmNm`), records from the legacy format are marked with missing contract symbols and categorized as `INCOMPLETE`, strictly adhering to the policy of never synthesizing fake contract symbols.
 * **Spot Price Integrity**: Spot prices are strictly historical as of each historical trade date. They are extracted directly from the official Bhavcopy `UndrlygPric` field or official NSE Cash Market Bhavcopy (`sec_bhavdata_full_ddMMyyyy.csv` / `cm bhavcopy`).
 * **Zero Fabrication / No Current Price Fallback**: Yahoo regularMarketPrice current quote fallback was completely eliminated. The system **never** uses today's price for past dates and **never** substitutes 0 for missing data.
 * **Shared Daily Download**: Each daily Bhavcopy is downloaded **only once per date**, and shared across all active symbols in execution memory, saving bandwidth and Google Apps Script execution time.
@@ -42,9 +42,9 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 |---|---|---|
 | 1 | **Date** | Historical trading date (`YYYY-MM-DD`) |
 | 2 | **Symbol** | Stock symbol |
-| 3 | **Current Contract Symbol** | Near-month contract official identifier (from `FinInstrmNm`) |
+| 3 | **Current Contract Symbol** | Near-month contract official identifier (strictly from `FinInstrmNm`) |
 | 4 | **Current Expiry Date** | Near-month contract expiry (`YYYY-MM-DD`) |
-| 5 | **Next Contract Symbol** | Far-month contract official identifier (from `FinInstrmNm`) |
+| 5 | **Next Contract Symbol** | Far-month contract official identifier (strictly from `FinInstrmNm`) |
 | 6 | **Next Expiry Date** | Far-month contract expiry (`YYYY-MM-DD`) |
 | 7 | **Current Futures Price** | Near-month contract closing price (`ClsPric`) |
 | 8 | **Next Futures Price** | Far-month contract closing price (`ClsPric`) |
@@ -63,9 +63,9 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 
 ## 5. Contract Identifier Extraction & Strict Completeness
 
-* **Actual NSE Contract Identifiers**: Extracted directly from official `FinInstrmNm` (e.g. `RELIANCE26MAYFUT`, `TCS26JUNFUT`). Identifiers are never guessed or synthesized from tickers and expiry dates. Blank contract symbols are strictly rejected.
+* **Actual NSE Contract Identifiers**: Extracted directly from official `FinInstrmNm` (e.g. `RELIANCE26MAYFUT`, `TCS26JUNFUT`). Identifiers are never guessed or synthesized from tickers and expiry dates. Numeric `FinInstrmId` is stored separately and never substituted for `FinInstrmNm`. Blank contract symbols are strictly rejected.
 * **Distinct Expiries**: Current and Next contracts must have distinct expiry dates (`Current Expiry < Next Expiry`).
-* **Strict Completeness**: A record is considered complete **only when Spot > 0, Current Future ClsPric > 0, Next Future ClsPric > 0, and both contract symbols are non-blank**. Incomplete records are rejected and never saved to the main sheet.
+* **Strict Completeness**: A record is considered complete **only when Spot > 0, Current Future ClsPric > 0, Next Future ClsPric > 0, and both contract symbols are non-blank actual FinInstrmNm**. Incomplete records are rejected and never saved to the main sheet.
 
 ---
 
@@ -99,9 +99,10 @@ A genuine live validation was conducted across target symbols (`RELIANCE`, `TCS`
 
 ## 8. Remaining Limitations
 
-1. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
-2. **Newly Listed F&O Stocks**: Stocks newly admitted to the F&O segment within the last 6 months will only have records starting from their official F&O inclusion date.
-3. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
+1. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
+2. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
+3. **Newly Listed F&O Stocks**: Stocks newly admitted to the F&O segment within the last 6 months will only have records starting from their official F&O inclusion date.
+4. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
 
 ---
 

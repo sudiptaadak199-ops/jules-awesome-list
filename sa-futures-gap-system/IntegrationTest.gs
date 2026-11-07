@@ -3,11 +3,10 @@
  * IntegrationTest.gs - Standalone Google Apps Script integration test for the hardened Cloudflare Worker.
  *
  * IMPORTANT:
- * - This is an isolated integration test file.
+ * - Isolated test file.
  * - Does NOT modify any production files (DataProvider.gs, BackfillEngine.gs, etc.).
- * - Does NOT install triggers or modify production sheets.
  * - Reads WORKER_URL and API_TOKEN securely from Script Properties.
- * - NEVER hardcodes, exposes, or logs API_TOKEN.
+ * - NEVER hardcodes or logs API_TOKEN.
  *
  * Setup Instructions:
  * 1. Open Google Sheets > Extensions > Apps Script.
@@ -37,13 +36,12 @@ function testCloudflareWorkerIntegration() {
 
   var trimmedWorkerUrl = rawWorkerUrl.trim();
 
-  // 2. Validate that WORKER_URL uses HTTPS before making the request
+  // 2. Validate that WORKER_URL strictly uses HTTPS
   if (!/^https:\/\//i.test(trimmedWorkerUrl)) {
     Logger.log('[FAIL] Insecure or invalid WORKER_URL: URL must strictly use HTTPS protocol.');
     return { success: false, error: 'WORKER_URL must use HTTPS protocol' };
   }
 
-  // Sanitize URL (strip trailing slash)
   var workerBaseUrl = trimmedWorkerUrl.replace(/\/+$/, '');
   var testDate = '20261106';
   var requestUrl = workerBaseUrl + '/?date=' + testDate;
@@ -68,7 +66,6 @@ function testCloudflareWorkerIntegration() {
     response = UrlFetchApp.fetch(requestUrl, options);
   } catch (e) {
     var errElapsed = new Date().getTime() - startTime;
-    // Ensure error message does not leak tokens
     var safeErrorMsg = (e.message || 'Network fetch error').replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
     Logger.log('[FAIL] Fetch threw exception after ' + errElapsed + 'ms: ' + safeErrorMsg);
     return { success: false, error: safeErrorMsg, elapsedMs: errElapsed };
@@ -141,7 +138,7 @@ function testCloudflareWorkerIntegration() {
   }
   Logger.log('[PASS] Verified official CSV filename matches: ' + expectedFileName);
 
-  // 9. Read CSV header and identify exact column indexes for TckrSymb and FinInstrmNm
+  // 9. Robust CSV Parsing with exact column indexing
   var csvText = csvBlob.getDataAsString();
   var lines = csvText.split(/\r?\n/);
   Logger.log('CSV Line Count: ' + lines.length);
@@ -151,53 +148,93 @@ function testCloudflareWorkerIntegration() {
     return { success: false, error: 'Insufficient CSV lines' };
   }
 
-  var headerLine = lines[0].trim();
-  var headers = headerLine.split(',').map(function(h) { return h.trim(); });
-
+  // Parse header using robust CSV splitter
+  var headers = parseCsvLine(lines[0]);
   var tckrSymbIdx = headers.indexOf('TckrSymb');
   var finInstrmNmIdx = headers.indexOf('FinInstrmNm');
+  var finInstrmTpIdx = headers.indexOf('FinInstrmTp');
+  var clsPricIdx = headers.indexOf('ClsPric');
+  var xpryDtIdx = headers.indexOf('XpryDt');
 
-  if (tckrSymbIdx === -1) {
-    Logger.log('[FAIL] Missing mandatory header column: TckrSymb');
-    return { success: false, error: 'Missing header: TckrSymb' };
+  if (tckrSymbIdx === -1 || finInstrmNmIdx === -1) {
+    Logger.log('[FAIL] Missing mandatory header column: TckrSymb or FinInstrmNm');
+    return { success: false, error: 'Missing mandatory headers' };
   }
 
-  if (finInstrmNmIdx === -1) {
-    Logger.log('[FAIL] Missing mandatory header column: FinInstrmNm');
-    return { success: false, error: 'Missing header: FinInstrmNm' };
-  }
+  Logger.log('[PASS] Header Column Indexes: TckrSymb=' + tckrSymbIdx + ', FinInstrmNm=' + finInstrmNmIdx +
+    (finInstrmTpIdx !== -1 ? ', FinInstrmTp=' + finInstrmTpIdx : ''));
 
-  Logger.log('[PASS] Identified exact header column indexes: TckrSymb=' + tckrSymbIdx + ', FinInstrmNm=' + finInstrmNmIdx);
-
-  // 10. Verify at least one row where TckrSymb = RELIANCE and FinInstrmNm = FUTSTK (without arbitrary substring matching)
-  var relianceFutMatchCount = 0;
-  var sampleMatchedLine = '';
+  // 10. Diagnostics: Inspect actual RELIANCE records and distinct instrument classifications
+  var relianceRows = [];
+  var distinctFinInstrmTp = {};
+  var distinctSampleNm = [];
+  var relianceFuturesCount = 0;
+  var sampleFutureRecord = null;
 
   for (var r = 1; r < lines.length; r++) {
     var rawLine = lines[r].trim();
     if (!rawLine) continue;
 
-    var cols = rawLine.split(',').map(function(c) { return c.trim(); });
+    var cols = parseCsvLine(rawLine);
     var sym = (cols[tckrSymbIdx] || '').toUpperCase();
-    var instNm = (cols[finInstrmNmIdx] || '').toUpperCase();
 
-    // Verify row where TckrSymb is RELIANCE and FinInstrmNm is strictly FUTSTK
-    if (sym === 'RELIANCE' && instNm === 'FUTSTK') {
-      relianceFutMatchCount++;
-      if (!sampleMatchedLine) {
-        sampleMatchedLine = rawLine;
+    if (sym === 'RELIANCE') {
+      var instTp = (finInstrmTpIdx !== -1 && cols[finInstrmTpIdx]) ? cols[finInstrmTpIdx].trim().toUpperCase() : '';
+      var instNm = cols[finInstrmNmIdx] ? cols[finInstrmNmIdx].trim() : '';
+
+      if (instTp) distinctFinInstrmTp[instTp] = true;
+      if (distinctSampleNm.length < 5 && distinctSampleNm.indexOf(instNm) === -1) {
+        distinctSampleNm.push(instNm);
+      }
+
+      if (relianceRows.length < 5) {
+        relianceRows.push({
+          row: r,
+          FinInstrmTp: instTp,
+          FinInstrmNm: instNm,
+          ClsPric: clsPricIdx !== -1 ? cols[clsPricIdx] : '',
+          XpryDt: xpryDtIdx !== -1 ? cols[xpryDtIdx] : ''
+        });
+      }
+
+      // Check official NSE stock futures classification:
+      // In modern UDiFF format: FinInstrmTp === 'STF' (Stock Futures) and FinInstrmNm contains the contract name (e.g. RELIANCE26NOVFUT)
+      // In legacy bhavcopy: FinInstrmTp / INSTRUMENT === 'FUTSTK'
+      var isStockFuture = (instTp === 'STF' || instTp === 'FUTSTK' || instNm === 'FUTSTK' || (instNm.indexOf('RELIANCE') === 0 && instNm.indexOf('FUT') !== -1 && instNm.indexOf('CE') === -1 && instNm.indexOf('PE') === -1));
+
+      if (isStockFuture) {
+        relianceFuturesCount++;
+        if (!sampleFutureRecord) {
+          sampleFutureRecord = {
+            FinInstrmTp: instTp,
+            FinInstrmNm: instNm,
+            ClsPric: clsPricIdx !== -1 ? cols[clsPricIdx] : '',
+            XpryDt: xpryDtIdx !== -1 ? cols[xpryDtIdx] : ''
+          };
+        }
       }
     }
   }
 
-  Logger.log('Verified RELIANCE futures records count: ' + relianceFutMatchCount);
-  if (relianceFutMatchCount === 0) {
-    Logger.log('[FAIL] No matching row found where TckrSymb = RELIANCE and FinInstrmNm = FUTSTK.');
-    return { success: false, error: 'Missing RELIANCE FUTSTK records' };
+  // Safe Diagnostic Logging
+  Logger.log('--- DIAGNOSTIC INFORMATION ---');
+  Logger.log('1. Distinct FinInstrmTp for RELIANCE: [' + Object.keys(distinctFinInstrmTp).join(', ') + ']');
+  Logger.log('2. Sample FinInstrmNm values: [' + distinctSampleNm.join(', ') + ']');
+  Logger.log('3. First ' + relianceRows.length + ' RELIANCE rows in CSV:');
+  for (var i = 0; i < relianceRows.length; i++) {
+    var rowInfo = relianceRows[i];
+    Logger.log('   Row ' + (i + 1) + ': FinInstrmTp=' + rowInfo.FinInstrmTp + ', FinInstrmNm=' + rowInfo.FinInstrmNm +
+      ', ClsPric=' + rowInfo.ClsPric + ', XpryDt=' + rowInfo.XpryDt);
   }
 
-  Logger.log('Sample Matched Record: ' + sampleMatchedLine.slice(0, 150));
-  Logger.log('[PASS] Exact column index validation succeeded for RELIANCE futures.');
+  if (relianceFuturesCount === 0) {
+    Logger.log('[FAIL] Zero RELIANCE stock futures records found.');
+    return { success: false, error: 'No RELIANCE futures records found' };
+  }
+
+  Logger.log('[PASS] Verified official RELIANCE stock futures records count: ' + relianceFuturesCount);
+  Logger.log('   Sample Verified Futures Contract: FinInstrmTp=' + sampleFutureRecord.FinInstrmTp +
+    ', FinInstrmNm=' + sampleFutureRecord.FinInstrmNm + ', ClsPric=' + sampleFutureRecord.ClsPric + ', XpryDt=' + sampleFutureRecord.XpryDt);
 
   Logger.log('=== CLOUDFLARE WORKER GAS INTEGRATION TEST PASSED ===');
   return {
@@ -208,6 +245,34 @@ function testCloudflareWorkerIntegration() {
     elapsedMs: elapsedMs,
     fileName: csvFileName,
     lineCount: lines.length,
-    relianceContracts: relianceFutMatchCount
+    relianceContracts: relianceFuturesCount
   };
+}
+
+/**
+ * Robust CSV line parser supporting quoted fields and embedded commas.
+ */
+function parseCsvLine(line) {
+  var result = [];
+  var curr = '';
+  var inQuotes = false;
+
+  for (var i = 0; i < line.length; i++) {
+    var c = line[i];
+    if (c === '"') {
+      if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+        curr += '"';
+        i++; // skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (c === ',' && !inQuotes) {
+      result.push(curr.trim());
+      curr = '';
+    } else {
+      curr += c;
+    }
+  }
+  result.push(curr.trim());
+  return result;
 }

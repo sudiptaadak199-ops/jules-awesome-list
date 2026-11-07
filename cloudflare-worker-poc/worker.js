@@ -6,14 +6,21 @@
  *    Requests without a valid `Authorization: Bearer <API_TOKEN>` return 401 Unauthorized.
  * 2. Method Validation: Accepts ONLY GET requests. Rejects all other methods with 405.
  * 3. Path Validation: Accepts ONLY `/`, `/health`, and `/ping`. Rejects other paths with 404.
- * 4. Strict Query Validation: Rejects unexpected query parameters. On `/`, only `?date=YYYYMMDD` is accepted.
+ * 4. Strict Query Validation:
+ *    - Rejects ALL query parameters on `/health` and `/ping` with 400 Bad Request.
+ *    - On `/`, accepts ONLY a single `?date=YYYYMMDD`.
+ *    - Rejects duplicate date parameters (e.g. `?date=20261106&date=20261107`) with 400 Bad Request.
+ *    - Rejects unexpected query parameters with 400 Bad Request.
  * 5. Real Calendar Date Validation: Validates that YYYYMMDD represents a real calendar date
  *    (e.g., rejects 20260230 / Feb 30 with 400 Bad Request).
- * 6. Fallback Behavior: If primary NSE archive URL returns 404 or fails, tries alternate URL before erroring.
- * 7. Genuine ZIP Validation: Verifies standard PK ZIP signature (0x04034b50) to prevent serving HTML/WAF error pages.
- * 8. Pure Binary Streaming: Preserves original binary ZIP bytes without alteration.
- * 9. Removed unnecessary wildcard CORS headers.
- * 10. Maintains diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
+ * 6. Accurate Fallback Source Tracking:
+ *    - `X-NSE-Source` strictly identifies the host whose response is actually being returned:
+ *      `nsearchives.nseindia.com` if primary was returned, `archives.nseindia.com` if alternate was returned.
+ * 7. Genuine ZIP Validation & Integrity Buffering:
+ *    - The worker buffers the response via `arrayBuffer()` to verify standard PK zip magic bytes (0x50 0x4B 0x03 0x04)
+ *      before returning it, guaranteeing that HTML error pages or WAF challenge pages are never served as 200 OK.
+ * 8. Pure Binary Delivery: Returns unaltered raw binary ZIP bytes without modification.
+ * 9. Maintains diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
  */
 
 export default {
@@ -40,8 +47,17 @@ export default {
       });
     }
 
-    // Health / Ping public probe endpoints
+    // 3. Health / Ping public probe endpoints: Reject ANY query parameters
     if (url.pathname === '/health' || url.pathname === '/ping') {
+      if (url.searchParams.toString() !== '') {
+        return new Response(JSON.stringify({
+          error: 'Query parameters are not permitted on health/ping endpoints'
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
       return new Response(JSON.stringify({
         status: 'OK',
         service: 'NSE-FO-Bhavcopy-Relay-Worker',
@@ -52,7 +68,7 @@ export default {
       });
     }
 
-    // 3. API Token Authentication: require valid Bearer token matching env.API_TOKEN
+    // 4. API Token Authentication: require valid Bearer token matching env.API_TOKEN
     const expectedToken = (env && env.API_TOKEN) ? env.API_TOKEN : null;
     const authHeader = request.headers.get('Authorization') || '';
     const match = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -71,7 +87,8 @@ export default {
       });
     }
 
-    // 4. Query Parameter Validation: Reject unexpected query parameters
+    // 5. Query Parameter Validation on root '/':
+    // Reject unexpected query parameters
     const paramKeys = Array.from(url.searchParams.keys());
     const unexpectedParams = paramKeys.filter(k => k !== 'date');
     if (unexpectedParams.length > 0) {
@@ -79,6 +96,18 @@ export default {
         error: 'Unexpected query parameter(s)',
         unexpected: unexpectedParams,
         allowed_params: ['date']
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Reject duplicate date parameters (e.g. ?date=20261106&date=20261107)
+    const allDateParams = url.searchParams.getAll('date');
+    if (allDateParams.length > 1) {
+      return new Response(JSON.stringify({
+        error: 'Duplicate date parameter not allowed',
+        provided: allDateParams
       }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
@@ -96,7 +125,7 @@ export default {
       });
     }
 
-    // 5. Strict Real Calendar Date Validation (e.g. rejects 20260230)
+    // 6. Strict Real Calendar Date Validation (e.g. rejects 20260230)
     const year = parseInt(dateParam.slice(0, 4), 10);
     const month = parseInt(dateParam.slice(4, 6), 10);
     const day = parseInt(dateParam.slice(6, 8), 10);
@@ -108,7 +137,6 @@ export default {
       });
     }
 
-    // Check calendar validity using Date constructor
     const testDate = new Date(Date.UTC(year, month - 1, day));
     if (testDate.getUTCFullYear() !== year || (testDate.getUTCMonth() + 1) !== month || testDate.getUTCDate() !== day) {
       return new Response(JSON.stringify({
@@ -120,9 +148,11 @@ export default {
       });
     }
 
-    // Internal URL Construction - never accept arbitrary external URLs
-    const primaryUrl = `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
-    const altUrl = `https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
+    // Internal URL Construction
+    const PRIMARY_HOST = 'nsearchives.nseindia.com';
+    const ALT_HOST = 'archives.nseindia.com';
+    const primaryUrl = `https://${PRIMARY_HOST}/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
+    const altUrl = `https://${ALT_HOST}/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
 
     const requestHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -133,39 +163,47 @@ export default {
 
     const startTime = Date.now();
     let nseResponse = null;
-    let usedSource = 'nsearchives.nseindia.com';
+    let returnedSource = PRIMARY_HOST;
 
-    // 6. Primary and Alternate URL Fallback
-    // If primary returns 404 or any non-200 failure, try alternate before returning an error!
+    // 7. Primary and Alternate URL Fallback with Precise Source Tracking
     try {
       nseResponse = await fetch(primaryUrl, {
         headers: requestHeaders,
         cf: { cacheTtl: 86400, cacheEverything: true }
       });
 
-      if (!nseResponse.ok) {
-        usedSource = 'archives.nseindia.com';
-        const altResponse = await fetch(altUrl, {
-          headers: requestHeaders,
-          cf: { cacheTtl: 86400, cacheEverything: true }
-        });
-        if (altResponse.ok || nseResponse.status === 404) {
+      if (nseResponse.ok) {
+        returnedSource = PRIMARY_HOST;
+      } else {
+        // Primary returned non-200 (including 404 or 5xx); try alternate mirror before returning
+        try {
+          const altResponse = await fetch(altUrl, {
+            headers: requestHeaders,
+            cf: { cacheTtl: 86400, cacheEverything: true }
+          });
+
+          // Always return the response from the server actually used
           nseResponse = altResponse;
+          returnedSource = ALT_HOST;
+        } catch (altErr) {
+          // Alternate threw network error; keep primary response and primary host
+          returnedSource = PRIMARY_HOST;
         }
       }
     } catch (err) {
-      // If primary threw a network error, try alternate
+      // Primary threw a network error; try alternate mirror
       try {
-        usedSource = 'archives.nseindia.com';
         nseResponse = await fetch(altUrl, {
           headers: requestHeaders,
           cf: { cacheTtl: 86400, cacheEverything: true }
         });
+        returnedSource = ALT_HOST;
       } catch (altErr) {
         const elapsed = Date.now() - startTime;
         return new Response(JSON.stringify({
           error: 'Fetch failure connecting to official NSE archives',
-          details: altErr.message,
+          primary_error: err.message,
+          alternate_error: altErr.message,
           elapsed_ms: elapsed
         }), {
           status: 502,
@@ -191,7 +229,7 @@ export default {
         headers: {
           'Content-Type': 'application/json',
           'X-NSE-Status': '404',
-          'X-NSE-Source': usedSource,
+          'X-NSE-Source': returnedSource,
           'X-Elapsed-Time-Ms': String(elapsed)
         }
       });
@@ -208,15 +246,15 @@ export default {
         headers: {
           'Content-Type': 'application/json',
           'X-NSE-Status': String(nseResponse.status),
-          'X-NSE-Source': usedSource,
+          'X-NSE-Source': returnedSource,
           'X-Elapsed-Time-Ms': String(elapsed)
         }
       });
     }
 
-    // 7. Genuine ZIP Validation:
-    // Read the body buffer to verify standard PK zip magic bytes (0x04034b50 / "PK\x03\x04")
-    // This prevents returning an HTML error/WAF challenge page disguised as 200 OK.
+    // 8. Genuine ZIP Validation & Integrity Buffering:
+    // Read the body buffer into memory to verify standard PK zip magic bytes (0x50 0x4B 0x03 0x04)
+    // before returning, ensuring HTML error/WAF challenge pages are never served as 200 OK.
     const zipArrayBuffer = await nseResponse.arrayBuffer();
     const zipBytes = new Uint8Array(zipArrayBuffer);
 
@@ -237,20 +275,20 @@ export default {
         headers: {
           'Content-Type': 'application/json',
           'X-NSE-Status': '502',
-          'X-NSE-Source': usedSource,
+          'X-NSE-Source': returnedSource,
           'X-Elapsed-Time-Ms': String(elapsed)
         }
       });
     }
 
-    // 8. Stream unaltered original binary ZIP
+    // Return unaltered raw binary ZIP payload
     return new Response(zipArrayBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip"`,
         'X-NSE-Status': '200',
-        'X-NSE-Source': usedSource,
+        'X-NSE-Source': returnedSource,
         'X-Elapsed-Time-Ms': String(elapsed),
         'Cache-Control': 'public, max-age=86400, immutable'
       }

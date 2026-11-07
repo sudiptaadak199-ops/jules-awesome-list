@@ -4,18 +4,23 @@
  * Comprehensive standalone test suite for the hardened Cloudflare Worker PoC.
  *
  * Verifies:
- * 1. Missing API token returns 401 Unauthorized.
- * 2. Incorrect API token returns 401 Unauthorized.
+ * 1. Missing Authorization token returns 401 Unauthorized.
+ * 2. Incorrect Authorization token returns 401 Unauthorized.
  * 3. Non-GET request (POST) returns 405 Method Not Allowed.
  * 4. Invalid path returns 404 Not Found.
- * 5. Unexpected query parameters return 400 Bad Request.
- * 6. Invalid calendar date (20260230 - Feb 30) returns 400 Bad Request.
- * 7. Public health endpoint /health and /ping return 200 OK.
- * 8. Valid date 20261106 with valid API token returns 200 OK and genuine ZIP archive.
- * 9. Absence of wildcard CORS headers.
- * 10. Presence of diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
- * 11. PK ZIP signature verification and decompression.
- * 12. Official CSV file validation: confirms BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv and derivative records.
+ * 5. Unexpected query parameters on root / return 400 Bad Request.
+ * 6. Duplicate date parameters (?date=20261106&date=20261107) return 400 Bad Request.
+ * 7. Unexpected query parameters on /health return 400 Bad Request.
+ * 8. Unexpected query parameters on /ping return 400 Bad Request.
+ * 9. Invalid calendar date (20260230 - Feb 30) returns 400 Bad Request.
+ * 10. Clean public health endpoint /health and /ping return 200 OK.
+ * 11. Valid date 20261106 with valid API token returns 200 OK and genuine ZIP archive.
+ * 12. Absence of wildcard CORS headers.
+ * 13. Presence of diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
+ * 14. PK ZIP signature verification and decompression.
+ * 15. Official CSV file validation: confirms BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv and derivative records.
+ * 16. Fallback Scenario: Primary failure (500) + Alternate success (200) sets X-NSE-Source to archives.nseindia.com.
+ * 17. Fallback Scenario: Both primary and alternate failing (404) sets X-NSE-Source to archives.nseindia.com.
  */
 
 const assert = require('assert');
@@ -84,7 +89,7 @@ import('./worker.js').then(async (workerModule) => {
     assert.strictEqual(res.status, 404);
   });
 
-  // 5. Unexpected query parameters rejected with 400
+  // 5. Unexpected query parameters on root / rejected with 400
   await testCase('Unexpected query parameters rejected with 400 Bad Request', async () => {
     const req = new Request('https://nse-bhavcopy-relay.workers.dev/?date=20261106&unexpected_param=123', {
       headers: { 'Authorization': `Bearer ${TEST_API_TOKEN}` }
@@ -95,7 +100,36 @@ import('./worker.js').then(async (workerModule) => {
     assert.strictEqual(body.error, 'Unexpected query parameter(s)');
   });
 
-  // 6. Invalid calendar date (20260230 - Feb 30) rejected with 400
+  // 6. Duplicate date parameter (?date=20261106&date=20261107) rejected with 400
+  await testCase('Duplicate date parameters rejected with 400 Bad Request', async () => {
+    const req = new Request('https://nse-bhavcopy-relay.workers.dev/?date=20261106&date=20261107', {
+      headers: { 'Authorization': `Bearer ${TEST_API_TOKEN}` }
+    });
+    const res = await worker.fetch(req, env, {});
+    assert.strictEqual(res.status, 400);
+    const body = await res.json();
+    assert.strictEqual(body.error, 'Duplicate date parameter not allowed');
+  });
+
+  // 7. Unexpected parameters on /health rejected with 400
+  await testCase('Unexpected query parameters on /health rejected with 400 Bad Request', async () => {
+    const req = new Request('https://nse-bhavcopy-relay.workers.dev/health?foo=bar');
+    const res = await worker.fetch(req, env, {});
+    assert.strictEqual(res.status, 400);
+    const body = await res.json();
+    assert(body.error.includes('Query parameters are not permitted'));
+  });
+
+  // 8. Unexpected parameters on /ping rejected with 400
+  await testCase('Unexpected query parameters on /ping rejected with 400 Bad Request', async () => {
+    const req = new Request('https://nse-bhavcopy-relay.workers.dev/ping?test=123');
+    const res = await worker.fetch(req, env, {});
+    assert.strictEqual(res.status, 400);
+    const body = await res.json();
+    assert(body.error.includes('Query parameters are not permitted'));
+  });
+
+  // 9. Invalid calendar date (20260230 - Feb 30) rejected with 400
   await testCase('Invalid calendar date (20260230 - Feb 30) rejected with 400 Bad Request', async () => {
     const req = new Request('https://nse-bhavcopy-relay.workers.dev/?date=20260230', {
       headers: { 'Authorization': `Bearer ${TEST_API_TOKEN}` }
@@ -106,16 +140,18 @@ import('./worker.js').then(async (workerModule) => {
     assert(body.error.includes('Invalid calendar date'));
   });
 
-  // 7. Public health endpoint /health returns 200 without token
-  await testCase('Public health endpoint /health returns 200 OK without token', async () => {
-    const req = new Request('https://nse-bhavcopy-relay.workers.dev/health');
-    const res = await worker.fetch(req, env, {});
-    assert.strictEqual(res.status, 200);
-    const body = await res.json();
-    assert.strictEqual(body.status, 'OK');
+  // 10. Clean public health endpoint /health and /ping return 200 without token
+  await testCase('Clean public health endpoints /health and /ping return 200 OK without token', async () => {
+    const reqHealth = new Request('https://nse-bhavcopy-relay.workers.dev/health');
+    const resHealth = await worker.fetch(reqHealth, env, {});
+    assert.strictEqual(resHealth.status, 200);
+
+    const reqPing = new Request('https://nse-bhavcopy-relay.workers.dev/ping');
+    const resPing = await worker.fetch(reqPing, env, {});
+    assert.strictEqual(resPing.status, 200);
   });
 
-  // 8. Valid date 20261106 with valid token returns 200 and genuine ZIP archive
+  // 11. Valid date 20261106 with valid token returns 200 and genuine ZIP archive
   console.log('\nExecuting genuine live NSE fetch for date 20261106 with valid API token...');
   let liveRes = null;
   await testCase('Valid date 20261106 with valid API token returns 200 and binary ZIP', async () => {
@@ -127,20 +163,20 @@ import('./worker.js').then(async (workerModule) => {
     assert.strictEqual(liveRes.headers.get('Content-Type'), 'application/zip');
   });
 
-  // 9. Absence of wildcard CORS headers
+  // 12. Absence of wildcard CORS headers
   await testCase('Absence of unnecessary wildcard CORS header', async () => {
     assert.strictEqual(liveRes.headers.get('Access-Control-Allow-Origin'), null);
   });
 
-  // 10. Presence of diagnostic headers
+  // 13. Presence of diagnostic headers
   await testCase('Diagnostic headers present: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms', async () => {
     assert.strictEqual(liveRes.headers.get('X-NSE-Status'), '200');
-    assert(liveRes.headers.get('X-NSE-Source').includes('nseindia.com'));
+    assert.strictEqual(liveRes.headers.get('X-NSE-Source'), 'nsearchives.nseindia.com');
     assert(parseInt(liveRes.headers.get('X-Elapsed-Time-Ms'), 10) > 0);
     console.log(`   Source: ${liveRes.headers.get('X-NSE-Source')} | Elapsed: ${liveRes.headers.get('X-Elapsed-Time-Ms')}ms`);
   });
 
-  // 11. PK ZIP signature verification and decompression
+  // 14. PK ZIP signature verification and decompression
   let decompressedCsv = null;
   let zipFileName = '';
   await testCase('Genuine ZIP PK signature verification and decompression', async () => {
@@ -178,7 +214,7 @@ import('./worker.js').then(async (workerModule) => {
     assert.strictEqual(zipFileName, 'BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv');
   });
 
-  // 12. Official CSV file validation: confirms line count and authentic derivative records
+  // 15. Official CSV file validation: confirms line count and authentic derivative records
   await testCase('Official CSV file validation: confirms line count and authentic derivative records', async () => {
     const lines = decompressedCsv.split(/\r?\n/);
     console.log(`   CSV Total Lines: ${lines.length}`);
@@ -190,6 +226,57 @@ import('./worker.js').then(async (workerModule) => {
     const relRows = lines.filter(l => l.includes('RELIANCE') && l.includes('STF'));
     assert(relRows.length >= 2, 'Expected at least 2 RELIANCE STF contracts');
     console.log(`   Verified ${relRows.length} authentic RELIANCE STF records`);
+  });
+
+  // 16. Fallback Scenario: Primary failure (500) + Alternate success (200) sets X-NSE-Source to archives.nseindia.com
+  await testCase('Primary failure + alternate success sets X-NSE-Source to archives.nseindia.com', async () => {
+    const originalFetch = global.fetch;
+    // Mock global.fetch: primary returns 500, alternate returns valid ZIP
+    global.fetch = async (url, opts) => {
+      if (url.includes('nsearchives.nseindia.com')) {
+        return new Response('Primary WAF Error', { status: 500 });
+      }
+      if (url.includes('archives.nseindia.com')) {
+        // Return minimal valid PK zip
+        const validPkZip = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        return new Response(validPkZip, { status: 200, headers: { 'Content-Type': 'application/zip' } });
+      }
+      return originalFetch(url, opts);
+    };
+
+    const req = new Request('https://nse-bhavcopy-relay.workers.dev/?date=20261106', {
+      headers: { 'Authorization': `Bearer ${TEST_API_TOKEN}` }
+    });
+    const res = await worker.fetch(req, env, {});
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.headers.get('X-NSE-Source'), 'archives.nseindia.com');
+    assert.strictEqual(res.headers.get('X-NSE-Status'), '200');
+
+    global.fetch = originalFetch;
+  });
+
+  // 17. Fallback Scenario: Both primary and alternate failing (404) sets X-NSE-Source to archives.nseindia.com
+  await testCase('Both primary and alternate failing sets X-NSE-Source to last evaluated host (archives.nseindia.com)', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      if (url.includes('nsearchives.nseindia.com')) {
+        return new Response('Primary 404', { status: 404 });
+      }
+      if (url.includes('archives.nseindia.com')) {
+        return new Response('Alternate 404', { status: 404 });
+      }
+      return originalFetch(url, opts);
+    };
+
+    const req = new Request('https://nse-bhavcopy-relay.workers.dev/?date=20261106', {
+      headers: { 'Authorization': `Bearer ${TEST_API_TOKEN}` }
+    });
+    const res = await worker.fetch(req, env, {});
+    assert.strictEqual(res.status, 404);
+    assert.strictEqual(res.headers.get('X-NSE-Source'), 'archives.nseindia.com');
+    assert.strictEqual(res.headers.get('X-NSE-Status'), '404');
+
+    global.fetch = originalFetch;
   });
 
   console.log(`\n==========================================`);

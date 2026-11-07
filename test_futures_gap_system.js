@@ -641,35 +641,45 @@ runTest('DataProvider logs exact source label and elapsed time in diagnostic log
 });
 
 // 25. testCloudflareWorkerIntegration in IntegrationTest.gs executes and validates cleanly
-runTest('IntegrationTest.gs testCloudflareWorkerIntegration validates properties and payload structure', () => {
+runTest('IntegrationTest.gs testCloudflareWorkerIntegration validates HTTPS, exact column indexes, and payload structure', () => {
+  // Test A: Insecure HTTP protocol rejection
+  mockScriptProperties = {
+    WORKER_URL: 'http://insecure-worker.workers.dev',
+    API_TOKEN: 'test_token_secret'
+  };
+  const insecureRes = testCloudflareWorkerIntegration();
+  assert.strictEqual(insecureRes.success, false);
+  assert(insecureRes.error.includes('HTTPS'));
+
+  // Test B: Secure HTTPS execution with column-indexed verification
   mockScriptProperties = {
     WORKER_URL: 'https://test-worker.workers.dev',
     API_TOKEN: 'test_token_secret'
   };
 
-  // Construct a minimal valid PK zip containing BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv with STF in line
-  const csvContent = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric\n2026-11-06,RELIANCE,STF,RELIANCE26NOVFUT,1300.00,1295.00\n';
+  // Construct minimal valid PK zip containing BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv
+  const csvContent = 'TradDt,TckrSymb,FinInstrmNm,ClsPric,UndrlygPric\n2026-11-06,RELIANCE,FUTSTK,1300.00,1295.00\n';
   const deflatedCsv = zlib.deflateRawSync(Buffer.from(csvContent));
   const filename = Buffer.from('BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv');
 
   const header = Buffer.alloc(30);
-  header.writeUInt32LE(0x04034b50, 0); // signature
-  header.writeUInt16LE(20, 4); // version
-  header.writeUInt16LE(0, 6); // flags
-  header.writeUInt16LE(8, 8); // compression: deflate
-  header.writeUInt16LE(0, 10); // time
-  header.writeUInt16LE(0, 12); // date
-  header.writeUInt32LE(0, 14); // crc32
-  header.writeUInt32LE(deflatedCsv.length, 18); // comp size
-  header.writeUInt32LE(Buffer.byteLength(csvContent), 22); // uncomp size
-  header.writeUInt16LE(filename.length, 26); // name len
-  header.writeUInt16LE(0, 28); // extra len
+  header.writeUInt32LE(0x04034b50, 0);
+  header.writeUInt16LE(20, 4);
+  header.writeUInt16LE(0, 6);
+  header.writeUInt16LE(8, 8);
+  header.writeUInt16LE(0, 10);
+  header.writeUInt16LE(0, 12);
+  header.writeUInt32LE(0, 14);
+  header.writeUInt32LE(deflatedCsv.length, 18);
+  header.writeUInt32LE(Buffer.byteLength(csvContent), 22);
+  header.writeUInt16LE(filename.length, 26);
+  header.writeUInt16LE(0, 28);
 
   const mockZipBuffer = Buffer.concat([header, filename, deflatedCsv]);
 
   global.UrlFetchApp = {
     fetch: (url, opts) => {
-      assert(url.includes('date=20261106'));
+      assert(url.includes('https://test-worker.workers.dev/?date=20261106'));
       assert.strictEqual(opts.headers.Authorization, 'Bearer test_token_secret');
       return {
         getResponseCode: () => 200,

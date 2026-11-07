@@ -83,11 +83,9 @@ function testCloudflareWorkerIntegration() {
   Logger.log('Elapsed Time: ' + elapsedMs + 'ms');
   Logger.log('Content-Type: ' + contentType);
 
-  // 4. Verify HTTP status 200
+  // 4. Verify HTTP status 200 (Do not log response body to avoid leaking sensitive information)
   if (statusCode !== 200) {
     Logger.log('[FAIL] Expected status 200, got: ' + statusCode);
-    var contentSnippet = response.getContentText().slice(0, 300).replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
-    Logger.log('Response Content: ' + contentSnippet);
     return { success: false, statusCode: statusCode, error: 'Non-200 status code', elapsedMs: elapsedMs };
   }
 
@@ -183,9 +181,8 @@ function testCloudflareWorkerIntegration() {
     var sym = (cols[tckrSymbIdx] || '').toUpperCase();
     var instNm = (cols[finInstrmNmIdx] || '').toUpperCase();
 
-    // Verify row where TckrSymb is RELIANCE and FinInstrmNm is FUTSTK
-    // (also accepting FUTSTK instrument classification or contract identifier)
-    if (sym === 'RELIANCE' && (instNm === 'FUTSTK' || instNm.indexOf('FUTSTK') !== -1 || instNm.indexOf('FUT') !== -1)) {
+    // Verify row where TckrSymb is RELIANCE and FinInstrmNm is strictly FUTSTK
+    if (sym === 'RELIANCE' && instNm === 'FUTSTK') {
       relianceFutMatchCount++;
       if (!sampleMatchedLine) {
         sampleMatchedLine = rawLine;

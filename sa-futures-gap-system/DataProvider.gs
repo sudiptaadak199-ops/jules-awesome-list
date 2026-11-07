@@ -2,20 +2,28 @@
  * SA Automatic Futures Gap Analysis System
  * DataProvider.gs - Download and parse NSE UDiFF FO Bhavcopy, legacy FO Bhavcopy, and historical Spot Bhavcopies.
  *
- * Rules:
- * 1. Strictly official historical archives. NEVER use current prices (such as Yahoo regularMarketPrice) for past dates.
- * 2. Shared daily Bhavcopy downloaded once per date and cached in memory across symbols.
- * 3. Categorize results: SUCCESS, HOLIDAY, UNPUBLISHED, NETWORK_ERROR, ARCHIVE_UNAVAILABLE, PARSING_ERROR.
- * 4. Contract Identifiers: Extract real contract name from FinInstrmNm (or FinInstrmId) directly.
- *    Never guess or generate from ticker + expiry. Never accept blank contract identifiers.
- * 5. Close Price vs Settlement Price:
- *    Strictly prefer official Futures Closing Price (ClsPric) for gap calculations.
- *    NEVER silently substitute Settlement Price (SttlmPric) if ClsPric is missing or <= 0.
- *    If ClsPric is missing/invalid, closePrice is null, marking the record INCOMPLETE for recovery.
+ * Hardened Architecture:
+ * 1. Strict Execution Time Budgeting & Non-repetition:
+ *    - Never retry the same slow/hanging URL repeatedly within one execution.
+ *    - Tracks attempted URLs and fails fast if an endpoint previously hung or timed out.
+ * 2. Clear Diagnostic Logs:
+ *    - Logs exact source URL, HTTP status, and elapsed time in milliseconds.
+ * 3. Free Official Sources Only:
+ *    - Modern UDiFF FO Bhavcopy (primary and mirror archive).
+ *    - Legacy FO Bhavcopy.
+ *    - Official CM Bhavcopy (sec_bhavdata_full and legacy CM) for spot fallback.
+ *    - Zero Yahoo Finance fallback, zero synthetic futures prices.
+ * 4. Separate FinInstrmNm from FinInstrmId:
+ *    - contractSymbol = FinInstrmNm only. Blank when unavailable.
+ *    - instrumentId = FinInstrmId.
+ * 5. Strict ClsPric policy:
+ *    - Uses official Futures Closing Price (ClsPric) only. Never substitutes SttlmPric.
  */
 
 var DataProvider = {
   _dailyBhavcopyCache: {},
+  _attemptedUrls: {}, // Tracks URLs attempted in this execution to prevent repeated slow calls
+  _failedHostCount: {}, // Counts timeouts per host to trigger circuit breaker if host is hanging
 
   STATUS: {
     SUCCESS: 'SUCCESS',
@@ -23,6 +31,8 @@ var DataProvider = {
     UNPUBLISHED: 'UNPUBLISHED',
     ARCHIVE_UNAVAILABLE: 'ARCHIVE_UNAVAILABLE',
     NETWORK_ERROR: 'NETWORK_ERROR',
+    TIMEOUT: 'TIMEOUT',
+    CIRCUIT_BROKEN: 'CIRCUIT_BROKEN',
     PARSING_ERROR: 'PARSING_ERROR'
   },
 
@@ -69,7 +79,7 @@ var DataProvider = {
       errorMsg = udiffRes.error;
     }
 
-    if (!parsedData) {
+    if (!parsedData && fetchStatus !== this.STATUS.CIRCUIT_BROKEN) {
       var legacyRes = this._fetchNSELegacyFO(dateObj);
       if (legacyRes.status === this.STATUS.SUCCESS && legacyRes.data) {
         parsedData = legacyRes.data;
@@ -129,10 +139,10 @@ var DataProvider = {
     var dateKey = Utils.formatDateKey(dateObj);
     var url = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
 
-    var res = this._fetchAndUnzipCsv(url);
-    if (res.status !== this.STATUS.SUCCESS) {
+    var res = this._fetchAndUnzipCsv(url, 'NSE_UDIFF_PRIMARY');
+    if (res.status !== this.STATUS.SUCCESS && res.status !== this.STATUS.CIRCUIT_BROKEN) {
       var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
-      var altRes = this._fetchAndUnzipCsv(altUrl);
+      var altRes = this._fetchAndUnzipCsv(altUrl, 'NSE_UDIFF_ALT');
       if (altRes.status === this.STATUS.SUCCESS) {
         res = altRes;
       }
@@ -150,11 +160,6 @@ var DataProvider = {
     return { status: this.STATUS.SUCCESS, data: parsed, error: null };
   },
 
-  /**
-   * Parse CSV content of modern NSE UDiFF FO Bhavcopy.
-   * Extracts real contract symbol from FinInstrmNm (or FinInstrmId).
-   * Strictly extracts ClsPric as closePrice; never silently substitutes SttlmPric.
-   */
   parseUdiffFOCsv: function(csvText, dateKey) {
     if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
@@ -199,11 +204,9 @@ var DataProvider = {
       var symbol = (cols[colIdx.tckrSymb] || '').trim().toUpperCase();
       if (!symbol) continue;
 
-      // Extract actual FinInstrmNm strictly as contractSymbol
       var contractSymbol = (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) ? cols[colIdx.finInstrmNm].trim() : '';
       var instrumentId = (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) ? cols[colIdx.finInstrmId].trim() : '';
 
-      // Reject records with blank contract identifier
       if (!contractSymbol) {
         continue;
       }
@@ -213,9 +216,6 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      // STRICT CLOSE PRICE POLICY:
-      // Prefer official Futures Closing Price (ClsPric).
-      // NEVER silently substitute Settlement Price (SttlmPric).
       var rawClose = Utils.safeFloat(cols[colIdx.clsPric]);
       var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
       var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
@@ -232,11 +232,11 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol, // actual FinInstrmNm
-        instrumentId: instrumentId,     // separate FinInstrmId
+        contractSymbol: contractSymbol,
+        instrumentId: instrumentId,
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: closePrice, // Strictly ClsPric; null if missing
+        closePrice: closePrice,
         settlePrice: settlePrice,
         priceSource: closePrice !== null ? 'ClsPric' : (settlePrice !== null ? 'SttlmPric_Only' : 'NONE'),
         underlyingPrice: undrlygPrice
@@ -259,7 +259,7 @@ var DataProvider = {
       .replace('{MMM}', mmm)
       .replace('{YYYY}', yyyy);
 
-    var res = this._fetchAndUnzipCsv(url);
+    var res = this._fetchAndUnzipCsv(url, 'NSE_LEGACY_FO');
     if (res.status !== this.STATUS.SUCCESS) {
       return { status: res.status, data: null, error: res.error };
     }
@@ -316,10 +316,7 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      // In legacy bhavcopy, official FinInstrmNm is not provided.
-      // Do NOT synthesize fake identifiers (e.g. inst + '_' + symbol + '_' + expiry).
-      // Mark contractSymbol as '' (MISSING). ContractMapper will mark mapping as INCOMPLETE.
-      var contractSymbol = '';
+      var contractSymbol = ''; // Missing in legacy bhavcopy
 
       var rawClose = Utils.safeFloat(cols[colIdx.close]);
       var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
@@ -333,11 +330,11 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol, // MISSING for legacy format
+        contractSymbol: contractSymbol,
         instrumentId: '',
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: closePrice, // Strictly CLOSE price; never SETTLE_PR
+        closePrice: closePrice,
         settlePrice: settlePrice,
         priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null
@@ -361,10 +358,10 @@ var DataProvider = {
 
     var ddmmyyyy = Utils.formatDDMMYYYY(dateObj);
     var cmUrl = CONFIG.URLS.NSE_CM_SEC.replace('{DDMMYYYY}', ddmmyyyy);
-    var cmRes = this._fetchHttpText(cmUrl);
+    var cmRes = this._fetchHttpText(cmUrl, 'NSE_CM_SEC');
     if (cmRes.status !== this.STATUS.SUCCESS || !cmRes.text) {
       var cmAltUrl = CONFIG.URLS.NSE_CM_SEC_ALT.replace('{DDMMYYYY}', ddmmyyyy);
-      cmRes = this._fetchHttpText(cmAltUrl);
+      cmRes = this._fetchHttpText(cmAltUrl, 'NSE_CM_SEC_ALT');
     }
 
     if (cmRes.status === this.STATUS.SUCCESS && cmRes.text) {
@@ -382,7 +379,7 @@ var DataProvider = {
       .replace('{MMM}', mmm)
       .replace('{YYYY}', yyyy);
 
-    var legRes = this._fetchAndUnzipCsv(legacyCmUrl);
+    var legRes = this._fetchAndUnzipCsv(legacyCmUrl, 'NSE_LEGACY_CM');
     if (legRes.status === this.STATUS.SUCCESS && legRes.csvText) {
       this._parseAndApplySpotFromLegacyCm(legRes.csvText, parsedData, symbolsNeedingSpot);
     }
@@ -480,10 +477,26 @@ var DataProvider = {
     };
   },
 
-  _fetchHttpText: function(url) {
+  /**
+   * Safe HTTP text fetcher with circuit breaker, non-repetition, and timing diagnostic.
+   */
+  _fetchHttpText: function(url, sourceLabel) {
+    if (this._attemptedUrls[url]) {
+      return this._attemptedUrls[url]; // Never retry the same URL in the same execution!
+    }
+
+    var label = sourceLabel || url;
+    if (this._failedHostCount[label] >= 2) {
+      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, text: null, error: 'Circuit breaker open for ' + label };
+      this._attemptedUrls[url] = cbRes;
+      return cbRes;
+    }
+
     if (typeof UrlFetchApp === 'undefined') {
       return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'UrlFetchApp unavailable' };
     }
+
+    var startTime = new Date().getTime();
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
@@ -492,23 +505,59 @@ var DataProvider = {
           'Accept': '*/*'
         }
       });
+      var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
+      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + '] Status ' + code + ' in ' + elapsed + 'ms');
+
       if (code === 200) {
-        return { status: this.STATUS.SUCCESS, text: resp.getContentText(), error: null };
+        var successRes = { status: this.STATUS.SUCCESS, text: resp.getContentText(), error: null };
+        this._attemptedUrls[url] = successRes;
+        return successRes;
       } else if (code === 404) {
-        return { status: this.STATUS.ARCHIVE_UNAVAILABLE, text: null, error: 'HTTP 404 Not Found' };
+        var nfRes = { status: this.STATUS.ARCHIVE_UNAVAILABLE, text: null, error: 'HTTP 404 Not Found (' + elapsed + 'ms)' };
+        this._attemptedUrls[url] = nfRes;
+        return nfRes;
       } else {
-        return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'HTTP ' + code };
+        var errRes = { status: this.STATUS.NETWORK_ERROR, text: null, error: 'HTTP ' + code + ' (' + elapsed + 'ms)' };
+        this._attemptedUrls[url] = errRes;
+        return errRes;
       }
     } catch (e) {
-      return { status: this.STATUS.NETWORK_ERROR, text: null, error: e.message };
+      var errElapsed = new Date().getTime() - startTime;
+      this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + e.message);
+
+      var isTimeout = e.message && (e.message.indexOf('timed out') !== -1 || e.message.indexOf('Timeout') !== -1);
+      var failRes = {
+        status: isTimeout ? this.STATUS.TIMEOUT : this.STATUS.NETWORK_ERROR,
+        text: null,
+        error: e.message + ' (' + errElapsed + 'ms)'
+      };
+      this._attemptedUrls[url] = failRes;
+      return failRes;
     }
   },
 
-  _fetchAndUnzipCsv: function(url) {
+  /**
+   * Safe ZIP download and unzip with circuit breaker, non-repetition, and timing diagnostic.
+   */
+  _fetchAndUnzipCsv: function(url, sourceLabel) {
+    if (this._attemptedUrls[url]) {
+      return this._attemptedUrls[url]; // Never retry the same URL in the same execution!
+    }
+
+    var label = sourceLabel || url;
+    if (this._failedHostCount[label] >= 2) {
+      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, csvText: null, error: 'Circuit breaker open for ' + label };
+      this._attemptedUrls[url] = cbRes;
+      return cbRes;
+    }
+
     if (typeof UrlFetchApp === 'undefined' || typeof Utilities === 'undefined') {
       return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'GAS services unavailable' };
     }
+
+    var startTime = new Date().getTime();
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
@@ -517,21 +566,43 @@ var DataProvider = {
           'Accept': '*/*'
         }
       });
+      var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
+      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + '] Status ' + code + ' in ' + elapsed + 'ms');
+
       if (code === 200) {
         var blob = resp.getBlob();
         var unzippedBlobs = Utilities.unzip(blob);
         if (unzippedBlobs && unzippedBlobs.length > 0) {
-          return { status: this.STATUS.SUCCESS, csvText: unzippedBlobs[0].getDataAsString(), error: null };
+          var successRes = { status: this.STATUS.SUCCESS, csvText: unzippedBlobs[0].getDataAsString(), error: null };
+          this._attemptedUrls[url] = successRes;
+          return successRes;
         }
-        return { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file' };
+        var parseErr = { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file (' + elapsed + 'ms)' };
+        this._attemptedUrls[url] = parseErr;
+        return parseErr;
       } else if (code === 404) {
-        return { status: this.STATUS.ARCHIVE_UNAVAILABLE, csvText: null, error: 'HTTP 404 Archive Unavailable' };
+        var nfRes = { status: this.STATUS.ARCHIVE_UNAVAILABLE, csvText: null, error: 'HTTP 404 Archive Unavailable (' + elapsed + 'ms)' };
+        this._attemptedUrls[url] = nfRes;
+        return nfRes;
       } else {
-        return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'HTTP ' + code };
+        var errRes = { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'HTTP ' + code + ' (' + elapsed + 'ms)' };
+        this._attemptedUrls[url] = errRes;
+        return errRes;
       }
     } catch (e) {
-      return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: e.message };
+      var errElapsed = new Date().getTime() - startTime;
+      this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + e.message);
+
+      var isTimeout = e.message && (e.message.indexOf('timed out') !== -1 || e.message.indexOf('Timeout') !== -1);
+      var failRes = {
+        status: isTimeout ? this.STATUS.TIMEOUT : this.STATUS.NETWORK_ERROR,
+        csvText: null,
+        error: e.message + ' (' + errElapsed + 'ms)'
+      };
+      this._attemptedUrls[url] = failRes;
+      return failRes;
     }
   }
 };

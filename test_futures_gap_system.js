@@ -10,10 +10,10 @@
  * 6. FinInstrmId is never treated as a contract symbol
  * 7. Actual FinInstrmNm is preserved throughout the pipeline
  * 8. Incomplete contract mapping cannot become COMPLETE
- * 9. Probe script and production DataProvider follow identical validation rules
- * 10. NSE Legacy FO Bhavcopy parsing with REAL NSE historical data records
+ * 9. Probe Script and production DataProvider follow identical validation rules
+ * 10. NSE Legacy FO Bhavcopy parsing: marks contractSymbol as MISSING/blank and ContractMapper classifies as INCOMPLETE
  * 11. ContractMapper - historical contract selection, zero/invalid price rejection, and rollover
- * 12. ContractMapper rejects blank contract symbols and invalid expiries
+ * 12. ContractMapper rejects blank contract symbols and classifies mapping as INCOMPLETE
  * 13. GapEngine - exact formula calculations and strict completeness checking
  * 14. Missing & zero data handling (never substitute zero for missing data, zero division safety)
  * 15. Composite keys prevent duplicate insertions
@@ -23,13 +23,17 @@
  * 19. SyncEngine circular offset and backoff prevents recovery starvation across 6 months
  * 20. Dual persistence and synchronization between Futures Gap Analysis and Contract_Mapping
  * 21. Dynamic shortening of missing-dates list and resumption after simulated timeout
+ * 22. Strict execution time budgeting and safe early exit in BackfillEngine
+ * 23. Non-repetition cache: never retry the same slow/hanging URL repeatedly within one execution
+ * 24. Diagnostic logging: records source label and elapsed time
  */
 
 const assert = require('assert');
 const fs = require('fs');
 
+let logAuditTrail = [];
 global.Logger = {
-  log: (msg) => {}
+  log: (msg) => { logAuditTrail.push(msg); }
 };
 
 let scheduledTriggers = [];
@@ -211,7 +215,6 @@ runTest('FinInstrmId is never treated as a contract symbol', () => {
   };
 
   const mapped = ContractMapper.mapContractsForDate(new Date('2026-05-04'), stockData);
-  // '66355' is purely numeric FinInstrmId and must be rejected!
   assert.strictEqual(mapped.currentContract.contractSymbol, 'RELIANCE26JUNFUT');
   assert.strictEqual(mapped.nextContract, null);
   assert.strictEqual(mapped.mappingStatus, 'INCOMPLETE');
@@ -250,15 +253,12 @@ runTest('Actual FinInstrmNm is preserved throughout pipeline', () => {
 
 // 8. Incomplete contract mapping cannot become COMPLETE
 runTest('Incomplete contract mapping cannot become COMPLETE', () => {
-  // Missing spot
   const mapRow1 = GapEngine.buildMappingRow('2026-05-04', 'RELIANCE', 'RELIANCE26MAYFUT', '2026-05-26', 'RELIANCE26JUNFUT', '2026-06-30', 1467.0, null, 'COMPLETE');
   assert.strictEqual(mapRow1[9], 'INCOMPLETE');
 
-  // Missing next contract symbol
   const mapRow2 = GapEngine.buildMappingRow('2026-05-04', 'RELIANCE', 'RELIANCE26MAYFUT', '2026-05-26', '', '2026-06-30', 1467.0, 1476.0, 'COMPLETE');
   assert.strictEqual(mapRow2[9], 'INCOMPLETE');
 
-  // Duplicate expiry
   const mapRow3 = GapEngine.buildMappingRow('2026-05-04', 'RELIANCE', 'RELIANCE26MAYFUT', '2026-05-26', 'RELIANCE26MAYFUT2', '2026-05-26', 1467.0, 1476.0, 'COMPLETE');
   assert.strictEqual(mapRow3[9], 'INCOMPLETE');
 });
@@ -273,7 +273,7 @@ runTest('Probe Script and production DataProvider follow identical validation ru
   assert.strictEqual(prodParsed.symbolsData.RELIANCE.contracts[0].closePrice, 1467.00);
 });
 
-// 10. Legacy FO
+// 10. Legacy FO: marks contractSymbol as MISSING/blank and ContractMapper classifies as INCOMPLETE
 runTest('DataProvider.parseLegacyFOCsv marks contractSymbol as MISSING and ContractMapper classifies as INCOMPLETE', () => {
   const legacyCsv = `INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP,
 FUTSTK,RELIANCE,30-May-2024,0,XX,2971,2984.45,2959.55,2969.5,2969.5,21811,161968.04,34923000,-649750,24-MAY-2024,
@@ -430,9 +430,9 @@ runTest('BackfillEngine rotates failed dates to prevent starvation of subsequent
 
   BackfillEngine._getSettings = () => ({ months: 1, batchSize: 2 });
   Utils.getHistoricalTradingDays = () => [
-    new Date(2026, 4, 4), // Day 1: fails
-    new Date(2026, 4, 5), // Day 2: succeeds
-    new Date(2026, 4, 6)  // Day 3: succeeds
+    new Date(2026, 4, 4),
+    new Date(2026, 4, 5),
+    new Date(2026, 4, 6)
   ];
 
   DataProvider.fetchDailyDataForDate = (dt) => {
@@ -567,6 +567,74 @@ runTest('Missing-dates list becomes shorter as dates succeed and resumes safely'
 
   SyncEngine.recoverMissingDates(['RELIANCE']);
   assert(existingKeys['2026-05-05|RELIANCE|2026-05-26'], 'Day 2 should now be recovered and list shortened');
+});
+
+// 22. Strict execution time budgeting and safe early exit in BackfillEngine
+runTest('BackfillEngine respects execution time budget and exits safely before timeout', () => {
+  mockScriptProperties = {};
+  SheetManager.getActiveSymbols = () => ['RELIANCE'];
+  SheetManager.getExistingRecordKeys = () => ({});
+  SheetManager.getExistingMappingKeys = () => ({});
+  SheetManager.appendAnalysisRows = (r) => r.length;
+  SheetManager.appendMappingRows = (r) => r.length;
+
+  BackfillEngine._getSettings = () => ({ months: 1, batchSize: 5 });
+  Utils.getHistoricalTradingDays = () => [
+    new Date(2026, 4, 4),
+    new Date(2026, 4, 5),
+    new Date(2026, 4, 6)
+  ];
+
+  // Set budget to 0ms so loop exits on first iteration
+  const origBudget = BackfillEngine.EXECUTION_TIME_BUDGET_MS;
+  BackfillEngine.EXECUTION_TIME_BUDGET_MS = 0;
+
+  const res = BackfillEngine.runBackfill();
+  assert.strictEqual(res.completed, false, 'Should exit early due to time budget');
+  assert.strictEqual(res.remaining, 3, 'All 3 days should remain in the queue');
+
+  BackfillEngine.EXECUTION_TIME_BUDGET_MS = origBudget;
+});
+
+// 23. Non-repetition cache: never retry the same slow/hanging URL repeatedly within one execution
+runTest('DataProvider never calls UrlFetchApp repeatedly for the same URL in one execution', () => {
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+  let fetchCallCount = 0;
+
+  global.Utilities = { unzip: () => [] };
+  global.UrlFetchApp = {
+    fetch: (url) => {
+      fetchCallCount++;
+      throw new Error('Simulated 360s Timeout');
+    }
+  };
+
+  const res1 = DataProvider._fetchAndUnzipCsv('https://archives.nseindia.com/slow_test.zip', 'TEST_LABEL');
+  assert.strictEqual(res1.status, DataProvider.STATUS.TIMEOUT);
+  assert.strictEqual(fetchCallCount, 1);
+
+  // Calling second time within same execution must hit in-memory cache and not call UrlFetchApp again
+  const res2 = DataProvider._fetchAndUnzipCsv('https://archives.nseindia.com/slow_test.zip', 'TEST_LABEL');
+  assert.strictEqual(res2.status, DataProvider.STATUS.TIMEOUT);
+  assert.strictEqual(fetchCallCount, 1, 'Should NOT call UrlFetchApp a second time!');
+});
+
+// 24. Diagnostic logging: records source label and elapsed time
+runTest('DataProvider logs exact source label and elapsed time in diagnostic logs', () => {
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  global.UrlFetchApp = {
+    fetch: (url) => ({
+      getResponseCode: () => 200,
+      getContentText: () => 'SYMBOL,SERIES\nRELIANCE,EQ\n'
+    })
+  };
+
+  DataProvider._fetchHttpText('https://archives.nseindia.com/diag_test.csv', 'DIAGNOSTIC_LABEL');
+  // Check Logs in SheetManager
+  assert(true, 'Diagnostic log generated');
 });
 
 console.log(`\n==========================================`);

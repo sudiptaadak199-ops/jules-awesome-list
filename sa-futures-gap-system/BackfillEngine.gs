@@ -1,19 +1,24 @@
 /**
  * SA Automatic Futures Gap Analysis System
- * BackfillEngine.gs - Resumable historical backfill for ~6 months of trading-day data.
+ * BackfillEngine.gs - Resumable historical backfill with strict execution time budgeting.
  *
- * Rules:
- * 1. Dual synchronization: Saves complete rows to BOTH 'Futures Gap Analysis' and 'Contract_Mapping' simultaneously.
- * 2. Strict completeness rule: ONLY saves complete records (Valid Spot + Current Future + Next Future).
- * 3. Starvation prevention & queue rotation: Failing dates are rotated to the end of the queue.
- * 4. Exponential backoff tracking for temporary archive/network errors.
- * 5. Automatically continues batches via time-driven trigger until 100% complete.
+ * Hardened Features:
+ * 1. Strict Execution Time Budgeting:
+ *    - Automatically monitors elapsed time and safely exits early before 240 seconds (well within GAS 360s limit).
+ *    - Persists checkpoint state in PropertiesService and triggers scheduled continuation.
+ * 2. Non-repetition & Starvation Prevention:
+ *    - Never retries the same slow URL repeatedly.
+ *    - Rotates failing dates to the end of the queue.
+ * 3. Dual-Sheet Synchronization:
+ *    - Writes complete records synchronously to both 'Futures Gap Analysis' and 'Contract_Mapping'.
  */
 
 var BackfillEngine = {
   STATE_KEY: 'BACKFILL_STATE',
+  EXECUTION_TIME_BUDGET_MS: 240000, // 240 seconds safe early-exit budget
 
   runBackfill: function() {
+    var executionStartTime = new Date().getTime();
     SheetManager.initializeSheets();
     var activeSymbols = SheetManager.getActiveSymbols();
 
@@ -54,15 +59,23 @@ var BackfillEngine = {
     var mapRowsToAdd = [];
     var processedCount = 0;
     var reenqueueDates = [];
+    var unreachedDays = [];
 
     var now = new Date().getTime();
 
     for (var i = 0; i < daysToProcess.length; i++) {
+      // Strict Execution Time Budget Check
+      var currentElapsed = new Date().getTime() - executionStartTime;
+      if (currentElapsed >= this.EXECUTION_TIME_BUDGET_MS) {
+        SheetManager.log('WARN', 'Backfill', 'Execution time budget reached (' + currentElapsed + 'ms). Exiting batch early for safe continuation.');
+        unreachedDays = daysToProcess.slice(i);
+        break;
+      }
+
       var dateStr = daysToProcess[i];
       var dateObj = Utils.parseDate(dateStr);
       if (!dateObj) continue;
 
-      // Exponential backoff check: if nextRetryTime > now, defer
       var retryInfo = failedRetryMap[dateStr];
       if (retryInfo && retryInfo.nextRetryTime && retryInfo.nextRetryTime > now) {
         reenqueueDates.push(dateStr);
@@ -106,20 +119,20 @@ var BackfillEngine = {
       // Download shared daily Bhavcopy ONCE for this date
       var dailyData = DataProvider.fetchDailyDataForDate(dateObj, activeSymbols);
 
-      // Check fetch status
       if (dailyData.status === DataProvider.STATUS.HOLIDAY) {
         processedCount++;
         continue;
       }
 
-      // Recoverable error conditions: NETWORK_ERROR, ARCHIVE_UNAVAILABLE, UNPUBLISHED, PARSING_ERROR
+      // Recoverable error conditions: NETWORK_ERROR, ARCHIVE_UNAVAILABLE, TIMEOUT, CIRCUIT_BROKEN, UNPUBLISHED, PARSING_ERROR
       if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR ||
           dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE ||
+          dailyData.status === DataProvider.STATUS.TIMEOUT ||
+          dailyData.status === DataProvider.STATUS.CIRCUIT_BROKEN ||
           dailyData.status === DataProvider.STATUS.UNPUBLISHED ||
           dailyData.status === DataProvider.STATUS.PARSING_ERROR) {
 
         var currentCount = (retryInfo ? retryInfo.count : 0) + 1;
-        // Exponential backoff: 2^count * 60,000 ms (e.g. 2 min, 4 min, 8 min)
         var backoffMs = Math.pow(2, currentCount) * 60000;
         failedRetryMap[dateStr] = {
           count: currentCount,
@@ -128,9 +141,9 @@ var BackfillEngine = {
 
         if (currentCount <= 5) {
           reenqueueDates.push(dateStr);
-          SheetManager.log('WARN', 'Backfill', 'Temporary issue on ' + dateStr + ' (' + dailyData.status + '). Re-queued with backoff (attempt ' + currentCount + '/5).');
+          SheetManager.log('WARN', 'Backfill', 'Temporary issue on ' + dateStr + ' (' + dailyData.status + ': ' + dailyData.errorMsg + '). Re-queued with backoff (attempt ' + currentCount + '/5).');
         } else {
-          SheetManager.log('ERROR', 'Backfill', 'Max batch retries reached for ' + dateStr + '. Retained for background recovery.');
+          SheetManager.log('ERROR', 'Backfill', 'Max batch retries reached for ' + dateStr + '. Retained for periodic recovery.');
         }
         processedCount++;
         continue;
@@ -152,8 +165,8 @@ var BackfillEngine = {
         }
 
         var mapped = ContractMapper.mapContractsForDate(dateObj, stockData);
-        // STRICT COMPLETENESS: Spot, Current Future, and Next Future must all be valid (> 0)
-        if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0) {
+        // STRICT COMPLETENESS: Spot, Current Future, and Next Future must all be valid (> 0) and contractSymbol non-blank
+        if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0 || mapped.mappingStatus !== 'COMPLETE') {
           dateAllSymbolsProcessed = false;
           SheetManager.log('WARN', 'Backfill', 'Incomplete data for ' + symbol + ' on ' + dateStr + '. Skipped permanent save.');
           continue;
@@ -169,7 +182,6 @@ var BackfillEngine = {
 
         var recKey = Utils.makeRecordKey(dateStr, symbol, histExpiry);
 
-        // Synchronized Dual Insertion
         if (!existingGapKeys[recKey]) {
           var gapRow = GapEngine.buildAnalysisRow(dateStr, symbol, spot, curPrice, nextPrice, histExpiry);
           gapRowsToAdd.push(gapRow);
@@ -193,14 +205,12 @@ var BackfillEngine = {
           reenqueueDates.push(dateStr);
         }
       } else {
-        // Successfully processed: remove from failed retry map
         delete failedRetryMap[dateStr];
       }
 
       processedCount++;
     }
 
-    // Synchronously append rows to both sheets
     if (gapRowsToAdd.length > 0) {
       SheetManager.appendAnalysisRows(gapRowsToAdd);
       SheetManager.refreshDashboardSummary();
@@ -210,11 +220,11 @@ var BackfillEngine = {
     }
 
     if (gapRowsToAdd.length > 0) {
-      SheetManager.log('INFO', 'Backfill', 'Synchronously appended ' + gapRowsToAdd.length + ' complete historical rows across both sheets for ' + processedCount + ' days.');
+      SheetManager.log('INFO', 'Backfill', 'Synchronously appended ' + gapRowsToAdd.length + ' complete historical rows across both sheets.');
     }
 
-    // Starvation Prevention: Rotate re-enqueued dates to the END of the queue
-    var combinedRemaining = remainingQueue.concat(reenqueueDates);
+    // Recombine queue: unreached days from time budget exit + remaining queue + transient re-enqueued dates
+    var combinedRemaining = unreachedDays.concat(remainingQueue).concat(reenqueueDates);
 
     if (combinedRemaining.length > 0) {
       this._saveState({ datesQueue: combinedRemaining, failedRetryMap: failedRetryMap });

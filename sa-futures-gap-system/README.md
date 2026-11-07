@@ -4,20 +4,33 @@ A fast, lightweight, fully automated Google Sheets + Google Apps Script system f
 
 ---
 
-## 1. Core Rule & User Experience
+## 1. Technical Diagnosis: UrlFetchApp vs Browser Download
 
-The user **ONLY** adds or changes stock symbols in the **Symbols** sheet (e.g. `RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`).
-All other operations—historical backfill, dual contract mapping, expiry rollover, gap calculations, daily updates, error logs, starvation-free recovery, and trigger scheduling—are **100% automated** with zero manual intervention required.
+### The Issue
+- In standard web browsers (like Chrome), requesting NSE UDiFF archives from `nsearchives.nseindia.com` or `archives.nseindia.com` succeeds in <500ms.
+- In Google Apps Script, `UrlFetchApp.fetch()` or `UrlFetchApp.fetchAll()` originates from Google Cloud IP ranges (e.g. `35.x.x.x`), which can be aggressively throttled, rate-limited, or blocked by NSE's Akamai Web Application Firewall (WAF), leading to prolonged connections hanging until the 360-second execution quota is exhausted.
+
+### The Architectural Solution
+1. **Strict Execution Time Budgeting & Safe Early Exit**:
+   - `BackfillEngine.gs` and `SyncEngine.gs` enforce an explicit execution time budget of 240 seconds (`EXECUTION_TIME_BUDGET_MS = 240000`).
+   - If a batch approaches the budget, it immediately stops processing new dates, checkpoints unreached dates in `PropertiesService`, and schedules an automated continuation trigger (`scheduledBackfillContinuation`) to resume safely in 60 seconds without timing out.
+2. **URL Non-Repetition & Circuit Breakers**:
+   - `DataProvider.gs` maintains an in-memory `_attemptedUrls` cache during script execution. A slow or hanging URL is **never** retried repeatedly within the same execution run.
+   - If an endpoint times out twice, a circuit breaker trips (`STATUS.CIRCUIT_BROKEN`), failing fast to prevent hanging the rest of the batch.
+3. **Elapsed Time & Diagnostic Logging**:
+   - Every HTTP call logs its exact source endpoint, response code, and elapsed time in milliseconds to the `Logs` sheet (e.g. `[HTTP_DIAGNOSTIC] [NSE_UDIFF_PRIMARY] Status 200 in 482ms`), providing complete audit visibility.
+4. **Official Free Data Sources Only**:
+   - Primary: Official NSE UDiFF FO Bhavcopy (`https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
+   - Alternate: Official NSE Archives FO Bhavcopy (`https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
+   - Cash Market / Spot: Official NSE Sec Bhavdata (`sec_bhavdata_full_{DDMMYYYY}.csv`) and CM Bhavcopy archives.
+   - Zero synthetic prices, zero fake symbols, and zero Yahoo Finance fallbacks.
 
 ---
 
-## 2. Free Data Sources & Historical Integrity
+## 2. Core Rule & User Experience
 
-* **Primary Modern FO Data**: Official NSE UDiFF FO Bhavcopy (`BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip`) from official archives.
-* **Legacy FO Data**: Official historical NSE derivatives bhavcopy (`foDDMMMYYYYbhav.csv.zip`). Note: Because legacy Bhavcopy files do not contain the official contract identifier (`FinInstrmNm`), records from the legacy format are marked with missing contract symbols and categorized as `INCOMPLETE`, strictly adhering to the policy of never synthesizing fake contract symbols.
-* **Spot Price Integrity**: Spot prices are strictly historical as of each historical trade date. They are extracted directly from the official Bhavcopy `UndrlygPric` field or official NSE Cash Market Bhavcopy (`sec_bhavdata_full_ddMMyyyy.csv` / `cm bhavcopy`).
-* **Zero Fabrication / No Current Price Fallback**: Yahoo regularMarketPrice current quote fallback was completely eliminated. The system **never** uses today's price for past dates and **never** substitutes 0 for missing data.
-* **Shared Daily Download**: Each daily Bhavcopy is downloaded **only once per date**, and shared across all active symbols in execution memory, saving bandwidth and Google Apps Script execution time.
+The user **ONLY** adds or changes stock symbols in the **Symbols** sheet (e.g. `RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`).
+All other operations—historical backfill, dual contract mapping, expiry rollover, gap calculations, daily updates, error logs, starvation-free recovery, and trigger scheduling—are **100% automated** with zero manual intervention required.
 
 ---
 
@@ -99,9 +112,9 @@ A genuine live validation was conducted across target symbols (`RELIANCE`, `TCS`
 
 ## 8. Remaining Limitations
 
-1. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
-2. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
-3. **Newly Listed F&O Stocks**: Stocks newly admitted to the F&O segment within the last 6 months will only have records starting from their official F&O inclusion date.
+1. **Google Apps Script WAF IP Throttling**: Because Google Cloud shared IP pools can encounter Akamai/WAF rate limits when contacting `archives.nseindia.com`, the system uses an early exit (240s) and automatic continuation triggers. If an entire execution encounters timeouts on all mirrors, the batch exits cleanly and resumes automatically on the next trigger.
+2. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
+3. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
 4. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
 
 ---

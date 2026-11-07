@@ -2,16 +2,19 @@
  * SA Automatic Futures Gap Analysis System
  * SyncEngine.gs - Automatic symbol change detection, daily EOD update, 6-month missing dates recovery, and dual sheet synchronization.
  *
- * Rules:
- * 1. Synchronized Dual Insertion: Both 'Futures Gap Analysis' and 'Contract_Mapping' remain strictly synchronized.
- * 2. Strict completeness: ONLY valid complete records (Spot > 0, CurFut > 0, NxtFut > 0) are saved.
- * 3. Starvation prevention & Cursor pagination: Uses rotating cursor offset and exponential backoff so early failing dates never block subsequent missing dates.
- * 4. Missing date list becomes dynamically shorter as dates succeed.
+ * Hardened Features:
+ * 1. Strict Execution Time Budgeting:
+ *    - Monitored recovery cycle with 240s early exit limit to avoid GAS 360s hard timeout.
+ * 2. Non-repetition & Starvation-Free Recovery:
+ *    - Cursor pagination with exponential backoff cool-down.
+ * 3. Dual-Sheet Synchronization:
+ *    - Writes complete records synchronously to both 'Futures Gap Analysis' and 'Contract_Mapping'.
  */
 
 var SyncEngine = {
   RECOVERY_OFFSET_KEY: 'RECOVERY_OFFSET',
   RECOVERY_BACKOFF_KEY: 'RECOVERY_BACKOFF',
+  EXECUTION_TIME_BUDGET_MS: 240000,
 
   syncAll: function() {
     SheetManager.initializeSheets();
@@ -120,7 +123,10 @@ var SyncEngine = {
       return;
     }
 
-    if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR || dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE) {
+    if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR ||
+        dailyData.status === DataProvider.STATUS.TIMEOUT ||
+        dailyData.status === DataProvider.STATUS.CIRCUIT_BROKEN ||
+        dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE) {
       SheetManager.log('WARN', 'DailyUpdate', 'Archive issue for ' + dateStr + ': ' + dailyData.errorMsg + '. Will be recovered in next run.');
       return;
     }
@@ -139,8 +145,7 @@ var SyncEngine = {
       if (!stockData) continue;
 
       var mapped = ContractMapper.mapContractsForDate(targetDate, stockData);
-      // STRICT COMPLETENESS
-      if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0) {
+      if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0 || mapped.mappingStatus !== 'COMPLETE') {
         SheetManager.log('WARN', 'DailyUpdate', 'Incomplete data for ' + symbol + ' on ' + dateStr + '. Not saving.');
         continue;
       }
@@ -181,9 +186,10 @@ var SyncEngine = {
   /**
    * Scan past trading days across the entire configured 6-month history (~125-130 trading days)
    * to detect and safely recover any missing dates.
-   * STARVATION-FREE: Cursor pagination with exponential backoff for repeatedly failing dates.
+   * Hardened: Monitored with execution time budget to exit early before timeouts.
    */
   recoverMissingDates: function(activeSymbols) {
+    var recoveryStartTime = new Date().getTime();
     var tradingDays = Utils.getHistoricalTradingDays(6);
     var existingGapKeys = SheetManager.getExistingRecordKeys();
     var existingMapKeys = SheetManager.getExistingMappingKeys();
@@ -233,7 +239,6 @@ var SyncEngine = {
     var now = new Date().getTime();
     var backoffMap = this._loadBackoff();
 
-    // Filter out dates currently in backoff wait period
     var availableMissingDays = missingDays.filter(function(d) {
       var dKey = Utils.formatDateKey(d);
       var info = backoffMap[dKey];
@@ -245,7 +250,6 @@ var SyncEngine = {
       return;
     }
 
-    // Cursor pagination across available missing dates
     var offset = this._loadOffset();
     if (offset >= availableMissingDays.length) {
       offset = 0;
@@ -265,6 +269,13 @@ var SyncEngine = {
     var recoveredMapRows = [];
 
     for (var m = 0; m < recoveryBatch.length; m++) {
+      // Early exit if time budget exceeded
+      var currentElapsed = new Date().getTime() - recoveryStartTime;
+      if (currentElapsed >= this.EXECUTION_TIME_BUDGET_MS) {
+        SheetManager.log('WARN', 'Recovery', 'Recovery execution time budget reached (' + currentElapsed + 'ms). Exiting safely.');
+        break;
+      }
+
       var mDate = recoveryBatch[m];
       var mDateStr = Utils.formatDateKey(mDate);
       var dailyData = DataProvider.fetchDailyDataForDate(mDate, activeSymbols);
@@ -275,17 +286,19 @@ var SyncEngine = {
 
       if (dailyData.status === DataProvider.STATUS.NETWORK_ERROR ||
           dailyData.status === DataProvider.STATUS.ARCHIVE_UNAVAILABLE ||
+          dailyData.status === DataProvider.STATUS.TIMEOUT ||
+          dailyData.status === DataProvider.STATUS.CIRCUIT_BROKEN ||
           dailyData.status === DataProvider.STATUS.UNPUBLISHED ||
           dailyData.status === DataProvider.STATUS.PARSING_ERROR) {
 
         var count = (backoffMap[mDateStr] ? backoffMap[mDateStr].count : 0) + 1;
-        var waitMs = Math.min(Math.pow(2, count) * 60000, 24 * 3600 * 1000); // Exponential backoff up to 24h
+        var waitMs = Math.min(Math.pow(2, count) * 60000, 24 * 3600 * 1000);
         backoffMap[mDateStr] = {
           count: count,
           nextRetryTime: now + waitMs
         };
 
-        SheetManager.log('WARN', 'Recovery', 'Temporary error recovering ' + mDateStr + ' (' + dailyData.status + '). Scheduled backoff for ' + Math.round(waitMs / 60000) + ' min.');
+        SheetManager.log('WARN', 'Recovery', 'Temporary error recovering ' + mDateStr + ' (' + dailyData.status + ': ' + dailyData.errorMsg + '). Scheduled backoff for ' + Math.round(waitMs / 60000) + ' min.');
         continue;
       }
 
@@ -303,8 +316,7 @@ var SyncEngine = {
         }
 
         var mapped = ContractMapper.mapContractsForDate(mDate, sData);
-        // STRICT COMPLETENESS
-        if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0) {
+        if (!mapped.currentContract || !mapped.nextContract || mapped.spotPrice === null || mapped.spotPrice <= 0 || mapped.mappingStatus !== 'COMPLETE') {
           daySuccess = false;
           continue;
         }
@@ -333,7 +345,7 @@ var SyncEngine = {
       }
 
       if (daySuccess) {
-        delete backoffMap[mDateStr]; // Date succeeded, remove from backoff!
+        delete backoffMap[mDateStr];
       }
     }
 

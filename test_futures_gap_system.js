@@ -704,6 +704,94 @@ runTest('IntegrationTest.gs testCloudflareWorkerIntegration validates HTTPS, exa
   assert.strictEqual(result.relianceContracts, 1);
 });
 
+// 26. DataProvider._fetchNSEUdiffFO prioritizes Cloudflare Worker relay with Bearer authentication
+runTest('DataProvider fetches UDiFF FO via Cloudflare Worker relay when configured', () => {
+  DataProvider._dailyBhavcopyCache = {};
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  mockScriptProperties = {
+    WORKER_URL: 'https://sa-futures-gap-proxy.sudiptaadak199.workers.dev',
+    API_TOKEN: 'super_secret_auth_token_123'
+  };
+
+  const csvContent = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-11-06,RELIANCE,STF,RELIANCE26NOVFUT,1323.00,1319.99,2026-11-23\n';
+  let calledUrl = '';
+  let authSent = '';
+
+  global.UrlFetchApp = {
+    fetch: (url, opts) => {
+      calledUrl = url;
+      authSent = opts && opts.headers ? opts.headers.Authorization : '';
+      return {
+        getResponseCode: () => 200,
+        getBlob: () => ({
+          getBytes: () => [0x50, 0x4B, 0x03, 0x04]
+        })
+      };
+    }
+  };
+
+  global.Utilities = {
+    unzip: () => [{
+      getDataAsString: () => csvContent
+    }]
+  };
+
+  const dt = new Date('2026-11-06');
+  const res = DataProvider._fetchNSEUdiffFO(dt);
+  assert.strictEqual(res.status, 'SUCCESS');
+  assert(calledUrl.includes('https://sa-futures-gap-proxy.sudiptaadak199.workers.dev/?date=20261106'));
+  assert.strictEqual(authSent, 'Bearer super_secret_auth_token_123');
+  assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].contractSymbol, 'RELIANCE26NOVFUT');
+  assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].closePrice, 1323.00);
+});
+
+// 27. DataProvider gracefully falls back to direct NSE archives when worker returns 404 or fails
+runTest('DataProvider falls back to direct NSE archives when Cloudflare Worker relay fails', () => {
+  DataProvider._dailyBhavcopyCache = {};
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  mockScriptProperties = {
+    WORKER_URL: 'https://sa-futures-gap-proxy.sudiptaadak199.workers.dev',
+    API_TOKEN: 'super_secret_auth_token_123'
+  };
+
+  const csvContent = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-11-06,TCS,STF,TCS26NOVFUT,2420.00,2415.00,2026-11-23\n';
+  let attempts = [];
+
+  global.UrlFetchApp = {
+    fetch: (url, opts) => {
+      attempts.push(url);
+      if (url.includes('sa-futures-gap-proxy')) {
+        // Simulate Worker returning 404 or network timeout
+        return {
+          getResponseCode: () => 404
+        };
+      }
+      // Direct NSE archive fallback succeeds
+      return {
+        getResponseCode: () => 200,
+        getBlob: () => ({ getBytes: () => [0x50, 0x4B, 0x03, 0x04] })
+      };
+    }
+  };
+
+  global.Utilities = {
+    unzip: () => [{
+      getDataAsString: () => csvContent
+    }]
+  };
+
+  const dt = new Date('2026-11-06');
+  const res = DataProvider._fetchNSEUdiffFO(dt);
+  assert.strictEqual(res.status, 'SUCCESS');
+  assert(attempts.some(u => u.includes('sa-futures-gap-proxy')), 'Worker relay should be attempted first');
+  assert(attempts.some(u => u.includes('nsearchives.nseindia.com')), 'Direct archive should be called as fallback');
+  assert.strictEqual(res.data.symbolsData.TCS.contracts[0].contractSymbol, 'TCS26NOVFUT');
+});
+
 console.log(`\n==========================================`);
 console.log(`ALL ${passedTests} OF ${totalTests} TESTS PASSED SUCCESSFULLY!`);
 console.log(`==========================================\n`);

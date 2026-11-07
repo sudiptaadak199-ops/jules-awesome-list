@@ -3,20 +3,25 @@
  * DataProvider.gs - Download and parse NSE UDiFF FO Bhavcopy, legacy FO Bhavcopy, and historical Spot Bhavcopies.
  *
  * Hardened Architecture:
- * 1. Strict Execution Time Budgeting & Non-repetition:
+ * 1. Cloudflare Worker Edge Relay Integration:
+ *    - Dynamically reads WORKER_URL and API_TOKEN from PropertiesService.getScriptProperties().
+ *    - Prioritizes secure authenticated relay: GET {WORKER_URL}/?date={YYYYMMDD} with Authorization: Bearer {API_TOKEN}.
+ *    - Never hardcodes or logs API_TOKEN. Enforces HTTPS on WORKER_URL.
+ *    - Gracefully falls back to direct NSE archives if Worker is not configured.
+ * 2. Strict Execution Time Budgeting & Non-repetition:
  *    - Never retry the same slow/hanging URL repeatedly within one execution.
  *    - Tracks attempted URLs and fails fast if an endpoint previously hung or timed out.
- * 2. Clear Diagnostic Logs:
+ * 3. Clear Diagnostic Logs:
  *    - Logs exact source URL, HTTP status, and elapsed time in milliseconds.
- * 3. Free Official Sources Only:
- *    - Modern UDiFF FO Bhavcopy (primary and mirror archive).
+ * 4. Free Official Sources Only:
+ *    - Modern UDiFF FO Bhavcopy via Cloudflare Worker or direct official archives.
  *    - Legacy FO Bhavcopy.
  *    - Official CM Bhavcopy (sec_bhavdata_full and legacy CM) for spot fallback.
  *    - Zero Yahoo Finance fallback, zero synthetic futures prices.
- * 4. Separate FinInstrmNm from FinInstrmId:
+ * 5. Separate FinInstrmNm from FinInstrmId:
  *    - contractSymbol = FinInstrmNm only. Blank when unavailable.
  *    - instrumentId = FinInstrmId.
- * 5. Strict ClsPric policy:
+ * 6. Strict ClsPric policy:
  *    - Uses official Futures Closing Price (ClsPric) only. Never substitutes SttlmPric.
  */
 
@@ -134,22 +139,59 @@ var DataProvider = {
     return dMidnight >= tMidnight;
   },
 
+  /**
+   * Fetch and parse NSE UDiFF FO Bhavcopy.
+   * Priority:
+   * 1. If WORKER_URL and API_TOKEN are configured in Script Properties, fetch through Cloudflare Worker relay.
+   * 2. Fall back to direct official NSE archive endpoints.
+   */
   _fetchNSEUdiffFO: function(dateObj) {
     var ymd = Utils.formatYYYYMMDD(dateObj);
     var dateKey = Utils.formatDateKey(dateObj);
-    var url = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
 
-    var res = this._fetchAndUnzipCsv(url, 'NSE_UDIFF_PRIMARY');
-    if (res.status !== this.STATUS.SUCCESS && res.status !== this.STATUS.CIRCUIT_BROKEN) {
-      var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
-      var altRes = this._fetchAndUnzipCsv(altUrl, 'NSE_UDIFF_ALT');
-      if (altRes.status === this.STATUS.SUCCESS) {
-        res = altRes;
+    var res = null;
+
+    // Check for Cloudflare Worker configuration in Script Properties
+    var workerConfig = this._getWorkerConfig();
+    if (workerConfig && workerConfig.workerUrl && workerConfig.apiToken) {
+      var relayUrl = workerConfig.workerUrl + '/?date=' + ymd;
+      var authHeaders = {
+        'Authorization': 'Bearer ' + workerConfig.apiToken,
+        'Accept': 'application/zip'
+      };
+      res = this._fetchAndUnzipCsv(relayUrl, 'CLOUDFLARE_WORKER_RELAY', authHeaders);
+    }
+
+    // If Worker relay succeeded, parse and return
+    if (res && res.status === this.STATUS.SUCCESS) {
+      var parsedWorker = this.parseUdiffFOCsv(res.csvText, dateKey);
+      if (parsedWorker) {
+        return { status: this.STATUS.SUCCESS, data: parsedWorker, error: null };
       }
     }
 
-    if (res.status !== this.STATUS.SUCCESS) {
-      return { status: res.status, data: null, error: res.error };
+    // Direct official NSE archive fallback (only if worker not configured or failed non-circuit-broken)
+    if (!res || (res.status !== this.STATUS.SUCCESS && res.status !== this.STATUS.CIRCUIT_BROKEN)) {
+      var primaryUrl = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
+      var directRes = this._fetchAndUnzipCsv(primaryUrl, 'NSE_UDIFF_PRIMARY');
+
+      if (directRes.status !== this.STATUS.SUCCESS && directRes.status !== this.STATUS.CIRCUIT_BROKEN) {
+        var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
+        var altRes = this._fetchAndUnzipCsv(altUrl, 'NSE_UDIFF_ALT');
+        if (altRes.status === this.STATUS.SUCCESS) {
+          directRes = altRes;
+        }
+      }
+
+      if (directRes.status === this.STATUS.SUCCESS) {
+        res = directRes;
+      } else if (!res) {
+        res = directRes;
+      }
+    }
+
+    if (!res || res.status !== this.STATUS.SUCCESS) {
+      return { status: res ? res.status : this.STATUS.NETWORK_ERROR, data: null, error: res ? res.error : 'Fetch failed' };
     }
 
     var parsed = this.parseUdiffFOCsv(res.csvText, dateKey);
@@ -158,6 +200,36 @@ var DataProvider = {
     }
 
     return { status: this.STATUS.SUCCESS, data: parsed, error: null };
+  },
+
+  /**
+   * Read WORKER_URL and API_TOKEN from Script Properties.
+   * Enforces HTTPS protocol on WORKER_URL. Never logs API_TOKEN.
+   */
+  _getWorkerConfig: function() {
+    if (typeof PropertiesService === 'undefined') return null;
+    try {
+      var props = PropertiesService.getScriptProperties();
+      var rawUrl = props.getProperty('WORKER_URL');
+      var token = props.getProperty('API_TOKEN');
+
+      if (!rawUrl || !rawUrl.trim() || !token || !token.trim()) {
+        return null;
+      }
+
+      var trimmedUrl = rawUrl.trim();
+      if (!/^https:\/\//i.test(trimmedUrl)) {
+        SheetManager.log('WARN', 'CONFIG', 'WORKER_URL is invalid or insecure (must use HTTPS). Skipping worker relay.');
+        return null;
+      }
+
+      return {
+        workerUrl: trimmedUrl.replace(/\/+$/, ''),
+        apiToken: token.trim()
+      };
+    } catch (e) {
+      return null;
+    }
   },
 
   parseUdiffFOCsv: function(csvText, dateKey) {
@@ -316,7 +388,10 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
-      var contractSymbol = ''; // Missing in legacy bhavcopy
+      // In legacy bhavcopy, official FinInstrmNm is not provided.
+      // Do NOT synthesize fake identifiers (e.g. inst + '_' + symbol + '_' + expiry).
+      // Mark contractSymbol as '' (MISSING). ContractMapper will mark mapping as INCOMPLETE.
+      var contractSymbol = '';
 
       var rawClose = Utils.safeFloat(cols[colIdx.close]);
       var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
@@ -330,11 +405,11 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol,
+        contractSymbol: contractSymbol, // MISSING for legacy format
         instrumentId: '',
         expiryStr: expiryKey,
         expiryDate: expiryDate,
-        closePrice: closePrice,
+        closePrice: closePrice, // Strictly CLOSE price; never SETTLE_PR
         settlePrice: settlePrice,
         priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null
@@ -480,9 +555,9 @@ var DataProvider = {
   /**
    * Safe HTTP text fetcher with circuit breaker, non-repetition, and timing diagnostic.
    */
-  _fetchHttpText: function(url, sourceLabel) {
+  _fetchHttpText: function(url, sourceLabel, customHeaders) {
     if (this._attemptedUrls[url]) {
-      return this._attemptedUrls[url]; // Never retry the same URL in the same execution!
+      return this._attemptedUrls[url];
     }
 
     var label = sourceLabel || url;
@@ -496,14 +571,16 @@ var DataProvider = {
       return { status: this.STATUS.NETWORK_ERROR, text: null, error: 'UrlFetchApp unavailable' };
     }
 
+    var headers = customHeaders || {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*'
+    };
+
     var startTime = new Date().getTime();
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': '*/*'
-        }
+        headers: headers
       });
       var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
@@ -525,13 +602,14 @@ var DataProvider = {
     } catch (e) {
       var errElapsed = new Date().getTime() - startTime;
       this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
-      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + e.message);
+      var safeError = (e.message || '').replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + safeError);
 
-      var isTimeout = e.message && (e.message.indexOf('timed out') !== -1 || e.message.indexOf('Timeout') !== -1);
+      var isTimeout = safeError.indexOf('timed out') !== -1 || safeError.indexOf('Timeout') !== -1;
       var failRes = {
         status: isTimeout ? this.STATUS.TIMEOUT : this.STATUS.NETWORK_ERROR,
         text: null,
-        error: e.message + ' (' + errElapsed + 'ms)'
+        error: safeError + ' (' + errElapsed + 'ms)'
       };
       this._attemptedUrls[url] = failRes;
       return failRes;
@@ -541,9 +619,9 @@ var DataProvider = {
   /**
    * Safe ZIP download and unzip with circuit breaker, non-repetition, and timing diagnostic.
    */
-  _fetchAndUnzipCsv: function(url, sourceLabel) {
+  _fetchAndUnzipCsv: function(url, sourceLabel, customHeaders) {
     if (this._attemptedUrls[url]) {
-      return this._attemptedUrls[url]; // Never retry the same URL in the same execution!
+      return this._attemptedUrls[url];
     }
 
     var label = sourceLabel || url;
@@ -557,14 +635,16 @@ var DataProvider = {
       return { status: this.STATUS.NETWORK_ERROR, csvText: null, error: 'GAS services unavailable' };
     }
 
+    var headers = customHeaders || {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*'
+    };
+
     var startTime = new Date().getTime();
     try {
       var resp = UrlFetchApp.fetch(url, {
         muteHttpExceptions: true,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': '*/*'
-        }
+        headers: headers
       });
       var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
@@ -593,13 +673,14 @@ var DataProvider = {
     } catch (e) {
       var errElapsed = new Date().getTime() - startTime;
       this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
-      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + e.message);
+      var safeError = (e.message || '').replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + safeError);
 
-      var isTimeout = e.message && (e.message.indexOf('timed out') !== -1 || e.message.indexOf('Timeout') !== -1);
+      var isTimeout = safeError.indexOf('timed out') !== -1 || safeError.indexOf('Timeout') !== -1;
       var failRes = {
         status: isTimeout ? this.STATUS.TIMEOUT : this.STATUS.NETWORK_ERROR,
         csvText: null,
-        error: e.message + ' (' + errElapsed + 'ms)'
+        error: safeError + ' (' + errElapsed + 'ms)'
       };
       this._attemptedUrls[url] = failRes;
       return failRes;

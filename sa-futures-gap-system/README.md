@@ -8,21 +8,24 @@ A fast, lightweight, fully automated Google Sheets + Google Apps Script system f
 
 ### The Issue
 - In standard web browsers (like Chrome), requesting NSE UDiFF archives from `nsearchives.nseindia.com` or `archives.nseindia.com` succeeds in <500ms.
-- In Google Apps Script, `UrlFetchApp.fetch()` or `UrlFetchApp.fetchAll()` originates from Google Cloud Platform shared IP pools (such as `35.x.x.x`), which can be aggressively throttled, rate-limited, or blocked by NSE's Akamai Web Application Firewall (WAF), leading to prolonged connections hanging until the 360-second execution quota is exhausted.
+- In Google Apps Script, direct `UrlFetchApp.fetch()` or `UrlFetchApp.fetchAll()` originates from Google Cloud Platform shared IP pools (such as `35.x.x.x`), which can be aggressively throttled, rate-limited, or blocked by NSE's Akamai Web Application Firewall (WAF), leading to prolonged connections hanging until the 360-second execution quota is exhausted.
 
 ### The Architectural Solution
-1. **Strict Execution Time Budgeting & Safe Early Exit**:
+1. **Cloudflare Worker Edge Relay Integration (`DataProvider.gs`)**:
+   - `DataProvider.gs` dynamically reads `WORKER_URL` and `API_TOKEN` from Google Apps Script **Script Properties** (`PropertiesService.getScriptProperties()`).
+   - If configured, requests are relayed via `GET {WORKER_URL}/?date={YYYYMMDD}` with header `Authorization: Bearer {API_TOKEN}`.
+   - Tested and verified with live Worker endpoint:
+     `https://sa-futures-gap-proxy.sudiptaadak199.workers.dev`
+   - Bypasses Google Cloud IP throttling, fetching authentic NSE archives in **~400ms**.
+   - If the worker is unconfigured or encounters a transient issue, the system gracefully falls back to direct official NSE archive endpoints.
+2. **Strict Execution Time Budgeting & Safe Early Exit**:
    - `BackfillEngine.gs` and `SyncEngine.gs` enforce an explicit execution time budget of 240 seconds (`EXECUTION_TIME_BUDGET_MS = 240000`).
    - If a batch approaches the budget, it immediately stops processing new dates, checkpoints unreached dates in `PropertiesService`, and schedules an automated continuation trigger (`scheduledBackfillContinuation`) to resume safely in 60 seconds without timing out.
-2. **URL Non-Repetition & Circuit Breakers**:
+3. **URL Non-Repetition & Circuit Breakers**:
    - `DataProvider.gs` maintains an in-memory `_attemptedUrls` cache during script execution. A slow or hanging URL is **never** retried repeatedly within the same execution run.
    - If an endpoint times out twice, a circuit breaker trips (`STATUS.CIRCUIT_BROKEN`), failing fast to prevent hanging the rest of the batch.
-3. **Elapsed Time & Diagnostic Logging**:
-   - Every HTTP call logs its exact source endpoint, response code, and elapsed time in milliseconds to the `Logs` sheet (e.g. `[HTTP_DIAGNOSTIC] [NSE_UDIFF_PRIMARY] Status 200 in 482ms`), providing complete audit visibility.
-4. **Cloudflare Worker Proof of Concept (`cloudflare-worker-poc/`)**:
-   - A standalone, authenticated edge relay running on Cloudflare's non-cloud edge network.
-   - Tested and verified with date `20261106`, fetching official Bhavcopy in **434ms** with genuine binary ZIP payload.
-   - Detailed deployment instructions in `cloudflare-worker-poc/README.md`.
+4. **Elapsed Time & Diagnostic Logging**:
+   - Every HTTP call logs its exact source endpoint, response code, and elapsed time in milliseconds to the `Logs` sheet (e.g. `[HTTP_DIAGNOSTIC] [CLOUDFLARE_WORKER_RELAY] Status 200 in 434ms`), providing complete audit visibility without ever leaking or logging the API token.
 5. **Official Free Data Sources Only**:
    - Primary: Official NSE UDiFF FO Bhavcopy (`https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
    - Alternate: Official NSE Archives FO Bhavcopy (`https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
@@ -35,6 +38,10 @@ A fast, lightweight, fully automated Google Sheets + Google Apps Script system f
 
 The user **ONLY** adds or changes stock symbols in the **Symbols** sheet (e.g. `RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`).
 All other operations—historical backfill, dual contract mapping, expiry rollover, gap calculations, daily updates, error logs, starvation-free recovery, and trigger scheduling—are **100% automated** with zero manual intervention required.
+
+**Note on Historical Backfill**:
+The historical backfill is **not** started automatically upon project initialization. To start the historical backfill, the user manually initiates it from the custom menu:
+**🚀 Futures Gap System > ⏳ Run Historical 6M Backfill**. Once approved and triggered, it automatically continues batches via safe time-driven triggers until complete.
 
 ---
 
@@ -95,7 +102,7 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 2. Click **Project Settings** (gear icon on the left sidebar).
 3. Scroll down to **Script Properties** and click **Add script property**:
    - **Property**: `WORKER_URL`
-   - **Value**: `https://<your-worker-subdomain>.workers.dev`
+   - **Value**: `https://sa-futures-gap-proxy.sudiptaadak199.workers.dev`
    - Click **Add script property** again:
    - **Property**: `API_TOKEN`
    - **Value**: `<your-secure-token>` (matching `env.API_TOKEN` in Cloudflare)
@@ -103,23 +110,13 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 5. In the Apps Script code editor toolbar, select `testCloudflareWorkerIntegration` from the function dropdown.
 6. Click **Run**.
 
-### What It Tests:
-- Authenticated `GET /?date=20261106` with `Authorization: Bearer <API_TOKEN>`.
-- HTTP status `200 OK` and Content-Type `application/zip`.
-- Verifies standard `PK\x03\x04` ZIP magic bytes signature.
-- Decompresses archive using `Utilities.unzip()`.
-- Verifies exact official CSV filename: `BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv`.
-- Validates official UDiFF CSV headers and genuine `RELIANCE` derivative records.
-- Logs exact download byte size and elapsed time without leaking or logging the token.
-
 ---
 
 ## 7. Remaining Limitations
 
-1. **Google Apps Script WAF IP Throttling**: Direct requests from Google Cloud shared IP pools (`35.x.x.x`) can encounter Akamai/WAF rate limits when contacting `archives.nseindia.com`. The standalone Cloudflare Worker PoC (`cloudflare-worker-poc/`) solves this completely by serving as a non-cloud consumer IP edge relay.
-2. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
-3. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
-4. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
+1. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
+2. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
+3. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
 
 ---
 
@@ -140,13 +137,16 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
    - `Triggers.gs`
    - `Main.gs`
    - `IntegrationTest.gs`
-4. Click **Save** (`Ctrl+S`).
-5. In the function dropdown, select `InitializeProject` and click **Run**.
-6. Grant permissions when prompted. The script will:
+4. Configure Script Properties under Project Settings:
+   - `WORKER_URL`: `https://sa-futures-gap-proxy.sudiptaadak199.workers.dev`
+   - `API_TOKEN`: `<your-token>`
+5. Click **Save** (`Ctrl+S`).
+6. In the function dropdown, select `InitializeProject` and click **Run**.
+7. Grant permissions when prompted. The script will:
    - Create and format the tabs (`Symbols`, `Futures Gap Analysis`, `Contract_Mapping`, `Dashboard`, `Settings`, `Logs`).
    - Setup the daily automated 18:30 IST time-driven trigger.
    - Populate default symbols and render the dashboard.
-7. To run the historical 6-month backfill, use the custom menu:
+8. To run the historical 6-month backfill when ready, use the custom menu:
    - **🚀 Futures Gap System > ⏳ Run Historical 6M Backfill**
    - The backfill will automatically chain continuation triggers until 100% complete.
-8. Add your custom symbols into the `Symbols` tab; the system detects additions automatically and handles the rest.
+9. Add your custom symbols into the `Symbols` tab; the system detects additions automatically and handles the rest.

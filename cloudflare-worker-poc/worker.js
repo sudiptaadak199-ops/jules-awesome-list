@@ -1,46 +1,102 @@
 /**
- * SA Futures Gap Analysis System - Cloudflare Worker Proof of Concept
+ * SA Futures Gap Analysis System - Hardened Cloudflare Worker Edge Relay
  *
- * Purpose:
- * Standalone, secure, zero-cost edge relay to fetch official NSE UDiFF FO Bhavcopy ZIPs.
- * Bypasses Akamai/WAF IP blocks on Google Cloud Platform / Google Apps Script UrlFetchApp ranges.
- *
- * Security & Design Rules:
- * 1. Accepts ONLY parameter `date` conforming strictly to 8-digit format YYYYMMDD.
- * 2. URL is constructed INTERNALLY from verified official NSE archive domains.
- *    Never accepts or proxies arbitrary external URLs (not an open proxy).
- * 3. Returns the original raw binary ZIP payload without alteration or conversion.
- * 4. Adds diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
+ * Hardened Security & Operating Rules:
+ * 1. Secure API Token Authentication using Worker Secret `API_TOKEN`.
+ *    Requests without a valid `Authorization: Bearer <API_TOKEN>` return 401 Unauthorized.
+ * 2. Method Validation: Accepts ONLY GET requests. Rejects all other methods with 405.
+ * 3. Path Validation: Accepts ONLY `/`, `/health`, and `/ping`. Rejects other paths with 404.
+ * 4. Strict Query Validation: Rejects unexpected query parameters. On `/`, only `?date=YYYYMMDD` is accepted.
+ * 5. Real Calendar Date Validation: Validates that YYYYMMDD represents a real calendar date
+ *    (e.g., rejects 20260230 / Feb 30 with 400 Bad Request).
+ * 6. Fallback Behavior: If primary NSE archive URL returns 404 or fails, tries alternate URL before erroring.
+ * 7. Genuine ZIP Validation: Verifies standard PK ZIP signature (0x04034b50) to prevent serving HTML/WAF error pages.
+ * 8. Pure Binary Streaming: Preserves original binary ZIP bytes without alteration.
+ * 9. Removed unnecessary wildcard CORS headers.
+ * 10. Maintains diagnostic headers: X-NSE-Status, X-NSE-Source, X-Elapsed-Time-Ms.
  */
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const dateParam = url.searchParams.get('date');
+    // 1. Method Validation: Accept ONLY GET requests
+    if (request.method !== 'GET') {
+      return new Response(JSON.stringify({ error: 'Method not allowed', allowed: ['GET'] }), {
+        status: 405,
+        headers: {
+          'Content-Type': 'application/json',
+          'Allow': 'GET'
+        }
+      });
+    }
 
-    // Health check endpoint
+    const url = new URL(request.url);
+
+    // 2. Path Validation: Accept ONLY root '/', '/health', and '/ping'
+    const validPaths = ['/', '/health', '/ping'];
+    if (!validPaths.includes(url.pathname)) {
+      return new Response(JSON.stringify({ error: 'Not found', path: url.pathname }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Health / Ping public probe endpoints
     if (url.pathname === '/health' || url.pathname === '/ping') {
-      return new Response(JSON.stringify({ status: 'OK', service: 'NSE-FO-Bhavcopy-Relay-Worker' }), {
+      return new Response(JSON.stringify({
+        status: 'OK',
+        service: 'NSE-FO-Bhavcopy-Relay-Worker',
+        timestamp: new Date().toISOString()
+      }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // Input Validation: strictly 8 digits YYYYMMDD
+    // 3. API Token Authentication: require valid Bearer token matching env.API_TOKEN
+    const expectedToken = (env && env.API_TOKEN) ? env.API_TOKEN : null;
+    const authHeader = request.headers.get('Authorization') || '';
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    const providedToken = match ? match[1].trim() : null;
+
+    if (!expectedToken || !providedToken || providedToken !== expectedToken) {
+      return new Response(JSON.stringify({
+        error: 'Unauthorized',
+        message: 'A valid Authorization Bearer token matching API_TOKEN is required.'
+      }), {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="NSE Bhavcopy Relay"'
+        }
+      });
+    }
+
+    // 4. Query Parameter Validation: Reject unexpected query parameters
+    const paramKeys = Array.from(url.searchParams.keys());
+    const unexpectedParams = paramKeys.filter(k => k !== 'date');
+    if (unexpectedParams.length > 0) {
+      return new Response(JSON.stringify({
+        error: 'Unexpected query parameter(s)',
+        unexpected: unexpectedParams,
+        allowed_params: ['date']
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const dateParam = url.searchParams.get('date');
     if (!dateParam || !/^\d{8}$/.test(dateParam)) {
       return new Response(JSON.stringify({
         error: 'Invalid or missing date parameter',
         expected_format: 'YYYYMMDD (e.g. ?date=20261106)'
       }), {
         status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // Date sanity check (year 2000 - 2099, month 01-12, day 01-31)
+    // 5. Strict Real Calendar Date Validation (e.g. rejects 20260230)
     const year = parseInt(dateParam.slice(0, 4), 10);
     const month = parseInt(dateParam.slice(4, 6), 10);
     const day = parseInt(dateParam.slice(6, 8), 10);
@@ -48,10 +104,23 @@ export default {
     if (year < 2000 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31) {
       return new Response(JSON.stringify({ error: 'Date value out of range', date: dateParam }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        headers: { 'Content-Type': 'application/json' }
       });
     }
 
+    // Check calendar validity using Date constructor
+    const testDate = new Date(Date.UTC(year, month - 1, day));
+    if (testDate.getUTCFullYear() !== year || (testDate.getUTCMonth() + 1) !== month || testDate.getUTCDate() !== day) {
+      return new Response(JSON.stringify({
+        error: 'Invalid calendar date (day does not exist in given month/year)',
+        date: dateParam
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Internal URL Construction - never accept arbitrary external URLs
     const primaryUrl = `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
     const altUrl = `https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${dateParam}_F_0000.csv.zip`;
 
@@ -66,38 +135,46 @@ export default {
     let nseResponse = null;
     let usedSource = 'nsearchives.nseindia.com';
 
-    // 1. Try Primary Archive URL
+    // 6. Primary and Alternate URL Fallback
+    // If primary returns 404 or any non-200 failure, try alternate before returning an error!
     try {
       nseResponse = await fetch(primaryUrl, {
         headers: requestHeaders,
-        cf: {
-          cacheTtl: 86400, // Cache immutable historical archives at Cloudflare edge for 24h
-          cacheEverything: true
-        }
+        cf: { cacheTtl: 86400, cacheEverything: true }
       });
 
-      // 2. If primary returns 404 or fails, try alternate archive mirror
-      if (!nseResponse.ok && nseResponse.status !== 404) {
+      if (!nseResponse.ok) {
+        usedSource = 'archives.nseindia.com';
+        const altResponse = await fetch(altUrl, {
+          headers: requestHeaders,
+          cf: { cacheTtl: 86400, cacheEverything: true }
+        });
+        if (altResponse.ok || nseResponse.status === 404) {
+          nseResponse = altResponse;
+        }
+      }
+    } catch (err) {
+      // If primary threw a network error, try alternate
+      try {
         usedSource = 'archives.nseindia.com';
         nseResponse = await fetch(altUrl, {
           headers: requestHeaders,
           cf: { cacheTtl: 86400, cacheEverything: true }
         });
+      } catch (altErr) {
+        const elapsed = Date.now() - startTime;
+        return new Response(JSON.stringify({
+          error: 'Fetch failure connecting to official NSE archives',
+          details: altErr.message,
+          elapsed_ms: elapsed
+        }), {
+          status: 502,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Elapsed-Time-Ms': String(elapsed)
+          }
+        });
       }
-    } catch (err) {
-      const elapsed = Date.now() - startTime;
-      return new Response(JSON.stringify({
-        error: 'Fetch failure connecting to official NSE archives',
-        details: err.message,
-        elapsed_ms: elapsed
-      }), {
-        status: 502,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Elapsed-Time-Ms': String(elapsed),
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
     }
 
     const elapsed = Date.now() - startTime;
@@ -115,8 +192,7 @@ export default {
           'Content-Type': 'application/json',
           'X-NSE-Status': '404',
           'X-NSE-Source': usedSource,
-          'X-Elapsed-Time-Ms': String(elapsed),
-          'Access-Control-Allow-Origin': '*'
+          'X-Elapsed-Time-Ms': String(elapsed)
         }
       });
     }
@@ -133,16 +209,42 @@ export default {
           'Content-Type': 'application/json',
           'X-NSE-Status': String(nseResponse.status),
           'X-NSE-Source': usedSource,
-          'X-Elapsed-Time-Ms': String(elapsed),
-          'Access-Control-Allow-Origin': '*'
+          'X-Elapsed-Time-Ms': String(elapsed)
         }
       });
     }
 
-    // Return the original ZIP binary with intact byte-for-byte stream
-    const zipBlob = await nseResponse.blob();
+    // 7. Genuine ZIP Validation:
+    // Read the body buffer to verify standard PK zip magic bytes (0x04034b50 / "PK\x03\x04")
+    // This prevents returning an HTML error/WAF challenge page disguised as 200 OK.
+    const zipArrayBuffer = await nseResponse.arrayBuffer();
+    const zipBytes = new Uint8Array(zipArrayBuffer);
 
-    return new Response(zipBlob, {
+    const isZip = zipBytes.length >= 4 &&
+                  zipBytes[0] === 0x50 && // 'P'
+                  zipBytes[1] === 0x4B && // 'K'
+                  zipBytes[2] === 0x03 &&
+                  zipBytes[3] === 0x04;
+
+    if (!isZip) {
+      return new Response(JSON.stringify({
+        error: 'Invalid response from NSE archive: Payload is not a valid ZIP file',
+        date: dateParam,
+        byte_length: zipBytes.length,
+        elapsed_ms: elapsed
+      }), {
+        status: 502,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-NSE-Status': '502',
+          'X-NSE-Source': usedSource,
+          'X-Elapsed-Time-Ms': String(elapsed)
+        }
+      });
+    }
+
+    // 8. Stream unaltered original binary ZIP
+    return new Response(zipArrayBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/zip',
@@ -150,7 +252,6 @@ export default {
         'X-NSE-Status': '200',
         'X-NSE-Source': usedSource,
         'X-Elapsed-Time-Ms': String(elapsed),
-        'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'public, max-age=86400, immutable'
       }
     });

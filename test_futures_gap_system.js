@@ -30,6 +30,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const zlib = require('zlib');
 
 let logAuditTrail = [];
 global.Logger = {
@@ -112,7 +113,8 @@ const modules = [
   'BackfillEngine.gs',
   'SyncEngine.gs',
   'Triggers.gs',
-  'Main.gs'
+  'Main.gs',
+  'IntegrationTest.gs'
 ];
 
 modules.forEach(file => {
@@ -126,7 +128,8 @@ modules.forEach(file => {
     'if (typeof SheetManager !== "undefined") global.SheetManager = SheetManager;\n' +
     'if (typeof BackfillEngine !== "undefined") global.BackfillEngine = BackfillEngine;\n' +
     'if (typeof SyncEngine !== "undefined") global.SyncEngine = SyncEngine;\n' +
-    'if (typeof Triggers !== "undefined") global.Triggers = Triggers;\n'
+    'if (typeof Triggers !== "undefined") global.Triggers = Triggers;\n' +
+    'if (typeof testCloudflareWorkerIntegration !== "undefined") global.testCloudflareWorkerIntegration = testCloudflareWorkerIntegration;\n'
   );
   fn(global);
 });
@@ -635,6 +638,60 @@ runTest('DataProvider logs exact source label and elapsed time in diagnostic log
   DataProvider._fetchHttpText('https://archives.nseindia.com/diag_test.csv', 'DIAGNOSTIC_LABEL');
   // Check Logs in SheetManager
   assert(true, 'Diagnostic log generated');
+});
+
+// 25. testCloudflareWorkerIntegration in IntegrationTest.gs executes and validates cleanly
+runTest('IntegrationTest.gs testCloudflareWorkerIntegration validates properties and payload structure', () => {
+  mockScriptProperties = {
+    WORKER_URL: 'https://test-worker.workers.dev',
+    API_TOKEN: 'test_token_secret'
+  };
+
+  // Construct a minimal valid PK zip containing BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv with STF in line
+  const csvContent = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric\n2026-11-06,RELIANCE,STF,RELIANCE26NOVFUT,1300.00,1295.00\n';
+  const deflatedCsv = zlib.deflateRawSync(Buffer.from(csvContent));
+  const filename = Buffer.from('BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv');
+
+  const header = Buffer.alloc(30);
+  header.writeUInt32LE(0x04034b50, 0); // signature
+  header.writeUInt16LE(20, 4); // version
+  header.writeUInt16LE(0, 6); // flags
+  header.writeUInt16LE(8, 8); // compression: deflate
+  header.writeUInt16LE(0, 10); // time
+  header.writeUInt16LE(0, 12); // date
+  header.writeUInt32LE(0, 14); // crc32
+  header.writeUInt32LE(deflatedCsv.length, 18); // comp size
+  header.writeUInt32LE(Buffer.byteLength(csvContent), 22); // uncomp size
+  header.writeUInt16LE(filename.length, 26); // name len
+  header.writeUInt16LE(0, 28); // extra len
+
+  const mockZipBuffer = Buffer.concat([header, filename, deflatedCsv]);
+
+  global.UrlFetchApp = {
+    fetch: (url, opts) => {
+      assert(url.includes('date=20261106'));
+      assert.strictEqual(opts.headers.Authorization, 'Bearer test_token_secret');
+      return {
+        getResponseCode: () => 200,
+        getHeaders: () => ({ 'Content-Type': 'application/zip' }),
+        getBlob: () => ({
+          getBytes: () => Array.from(mockZipBuffer)
+        })
+      };
+    }
+  };
+
+  global.Utilities = {
+    unzip: (blob) => [{
+      getName: () => 'BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv',
+      getDataAsString: () => csvContent
+    }]
+  };
+
+  const result = testCloudflareWorkerIntegration();
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.fileName, 'BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv');
+  assert.strictEqual(result.relianceContracts, 1);
 });
 
 console.log(`\n==========================================`);

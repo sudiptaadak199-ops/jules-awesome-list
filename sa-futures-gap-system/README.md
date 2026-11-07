@@ -8,7 +8,7 @@ A fast, lightweight, fully automated Google Sheets + Google Apps Script system f
 
 ### The Issue
 - In standard web browsers (like Chrome), requesting NSE UDiFF archives from `nsearchives.nseindia.com` or `archives.nseindia.com` succeeds in <500ms.
-- In Google Apps Script, `UrlFetchApp.fetch()` or `UrlFetchApp.fetchAll()` originates from Google Cloud IP ranges (e.g. `35.x.x.x`), which can be aggressively throttled, rate-limited, or blocked by NSE's Akamai Web Application Firewall (WAF), leading to prolonged connections hanging until the 360-second execution quota is exhausted.
+- In Google Apps Script, `UrlFetchApp.fetch()` or `UrlFetchApp.fetchAll()` originates from Google Cloud Platform shared IP pools (such as `35.x.x.x`), which can be aggressively throttled, rate-limited, or blocked by NSE's Akamai Web Application Firewall (WAF), leading to prolonged connections hanging until the 360-second execution quota is exhausted.
 
 ### The Architectural Solution
 1. **Strict Execution Time Budgeting & Safe Early Exit**:
@@ -19,7 +19,11 @@ A fast, lightweight, fully automated Google Sheets + Google Apps Script system f
    - If an endpoint times out twice, a circuit breaker trips (`STATUS.CIRCUIT_BROKEN`), failing fast to prevent hanging the rest of the batch.
 3. **Elapsed Time & Diagnostic Logging**:
    - Every HTTP call logs its exact source endpoint, response code, and elapsed time in milliseconds to the `Logs` sheet (e.g. `[HTTP_DIAGNOSTIC] [NSE_UDIFF_PRIMARY] Status 200 in 482ms`), providing complete audit visibility.
-4. **Official Free Data Sources Only**:
+4. **Cloudflare Worker Proof of Concept (`cloudflare-worker-poc/`)**:
+   - A standalone, authenticated edge relay running on Cloudflare's non-cloud edge network.
+   - Tested and verified with date `20261106`, fetching official Bhavcopy in **434ms** with genuine binary ZIP payload.
+   - Detailed deployment instructions in `cloudflare-worker-poc/README.md`.
+5. **Official Free Data Sources Only**:
    - Primary: Official NSE UDiFF FO Bhavcopy (`https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
    - Alternate: Official NSE Archives FO Bhavcopy (`https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`).
    - Cash Market / Spot: Official NSE Sec Bhavdata (`sec_bhavdata_full_{DDMMYYYY}.csv`) and CM Bhavcopy archives.
@@ -82,44 +86,44 @@ All other operations—historical backfill, dual contract mapping, expiry rollov
 
 ---
 
-## 6. Starvation-Free Recovery & Execution Architecture
+## 6. Standalone Google Apps Script Integration Test (`IntegrationTest.gs`)
 
-- **Queue Rotation & Starvation Prevention**: In `BackfillEngine.gs`, transiently failing dates are rotated to the end of the queue so they never block subsequent dates.
-- **Cursor Pagination & Exponential Backoff**: In `SyncEngine.recoverMissingDates`, a persistent circular cursor offset ensures missing dates are processed round-robin. Failing dates enter an exponential backoff cool-down (up to 24h) to avoid wasteful re-fetching while allowing remaining missing dates to proceed.
-- **Resumable Auto-Continuing Batches**: Checkpoints in `PropertiesService` combined with single-execution continuation triggers (`ScriptApp.newTrigger().after(60000)`) allow large historical runs to resume automatically without human intervention.
-- **Confirmed Holidays vs Archive 404 Distinction**:
-  - `HOLIDAY`: Confirmed weekend or official NSE Holiday Master calendar entry.
-  - `ARCHIVE_UNAVAILABLE`: An HTTP 404 on an expected trading weekday is **not** assumed to be a holiday. It is preserved in the recovery queue.
-  - `UNPUBLISHED`: Current trading day file not yet released; queued for the next scheduled trigger.
+`IntegrationTest.gs` provides an isolated, standalone end-to-end integration test for the hardened Cloudflare Worker without modifying production pipeline files or installing triggers:
+
+### Setup Instructions for Script Properties:
+1. Open Google Sheets > **Extensions > Apps Script**.
+2. Click **Project Settings** (gear icon on the left sidebar).
+3. Scroll down to **Script Properties** and click **Add script property**:
+   - **Property**: `WORKER_URL`
+   - **Value**: `https://<your-worker-subdomain>.workers.dev`
+   - Click **Add script property** again:
+   - **Property**: `API_TOKEN`
+   - **Value**: `<your-secure-token>` (matching `env.API_TOKEN` in Cloudflare)
+4. Click **Save script properties**.
+5. In the Apps Script code editor toolbar, select `testCloudflareWorkerIntegration` from the function dropdown.
+6. Click **Run**.
+
+### What It Tests:
+- Authenticated `GET /?date=20261106` with `Authorization: Bearer <API_TOKEN>`.
+- HTTP status `200 OK` and Content-Type `application/zip`.
+- Verifies standard `PK\x03\x04` ZIP magic bytes signature.
+- Decompresses archive using `Utilities.unzip()`.
+- Verifies exact official CSV filename: `BhavCopy_NSE_FO_0_0_0_20261106_F_0000.csv`.
+- Validates official UDiFF CSV headers and genuine `RELIANCE` derivative records.
+- Logs exact download byte size and elapsed time without leaking or logging the token.
 
 ---
 
-## 7. Real NSE Validation & Empirical Evidence
+## 7. Remaining Limitations
 
-A genuine live validation was conducted across target symbols (`RELIANCE`, `TCS`, `INFY`, `HDFCBANK`, `ICICIBANK`) against official NSE UDiFF archives. Results are recorded in `contract_mapping_validation.csv`:
-
-* **Sample Dates Evaluated**: `2026-05-04`, `2026-06-01`, `2026-07-13`, `2026-08-24`, `2026-09-30`, `2026-11-04`.
-* **Total Evaluations**: 30 (6 dates × 5 symbols).
-* **Records with Valid Current & Next Contract Symbols**: 30 / 30 (100.0%).
-* **Incomplete Records**: 0 / 30.
-* **Price Field Used**: `ClsPric` (Closing Price).
-* **Sample Real Contract Identifiers**:
-  - `2026-05-04 RELIANCE`: Cur=`RELIANCE26MAYFUT` (Cls: 1467.0) | Nxt=`RELIANCE26JUNFUT` (Cls: 1476.3) | Spot: 1463.1 | Status: COMPLETE
-  - `2026-05-04 TCS`: Cur=`TCS26MAYFUT` (Cls: 2421.8) | Nxt=`TCS26JUNFUT` (Cls: 2410.2) | Spot: 2431.3 | Status: COMPLETE
-  - `2026-06-01 HDFCBANK`: Cur=`HDFCBANK26JUNFUT` (Cls: 735.0) | Nxt=`HDFCBANK26JULFUT` (Cls: 739.35) | Spot: 742.7 | Status: COMPLETE
-
----
-
-## 8. Remaining Limitations
-
-1. **Google Apps Script WAF IP Throttling**: Because Google Cloud shared IP pools can encounter Akamai/WAF rate limits when contacting `archives.nseindia.com`, the system uses an early exit (240s) and automatic continuation triggers. If an entire execution encounters timeouts on all mirrors, the batch exits cleanly and resumes automatically on the next trigger.
+1. **Google Apps Script WAF IP Throttling**: Direct requests from Google Cloud shared IP pools (`35.x.x.x`) can encounter Akamai/WAF rate limits when contacting `archives.nseindia.com`. The standalone Cloudflare Worker PoC (`cloudflare-worker-poc/`) solves this completely by serving as a non-cloud consumer IP edge relay.
 2. **Legacy Format Contract Identifiers**: Historical derivative bhavcopies prior to the NSE UDiFF transition (pre-July 2024) do not publish `FinInstrmNm`. In strict adherence to our zero-synthetic-identifier policy, legacy records without actual contract names cannot be marked `COMPLETE` and remain `INCOMPLETE`.
 3. **Intraday Live Ticks**: This system is designed for End-of-Day (EOD) Bhavcopy analysis. NSE publishes official EOD Bhavcopy archives each trading day between 18:00 and 19:30 IST. Prior to file publication on the current trading day, the status is marked `UNPUBLISHED` and evaluated on the 18:30 IST trigger.
 4. **Google Apps Script Triggers Quota**: Google accounts have a limit of 20 total active triggers per user. The system maintains clean trigger hygiene, keeping at most 1 daily trigger and 1 transient continuation trigger.
 
 ---
 
-## 9. Setup & Installation Instructions
+## 8. Setup & Installation Instructions
 
 1. Open [Google Sheets](https://sheets.new) and create a new blank spreadsheet.
 2. Go to **Extensions > Apps Script**.
@@ -135,6 +139,7 @@ A genuine live validation was conducted across target symbols (`RELIANCE`, `TCS`
    - `SyncEngine.gs`
    - `Triggers.gs`
    - `Main.gs`
+   - `IntegrationTest.gs`
 4. Click **Save** (`Ctrl+S`).
 5. In the function dropdown, select `InitializeProject` and click **Run**.
 6. Grant permissions when prompted. The script will:

@@ -83,6 +83,8 @@ The historical backfill is **not** started automatically upon project initializa
 * **No Silent Substitution**: The system **never** silently substitutes Settlement Price (`SttlmPric`) for Closing Price.
 * **Missing Closing Price Handling**: If `ClsPric` is missing or `<= 0`, the contract record is rejected early before `symbolsData` or contract creation. It is never appended with null or invalid prices.
 * **Exact CSV Column & Date Validation**: Every parser validates exact row column counts against header schema (`cols.length === expectedColCount`). Rejects missing, invalid, or mismatched dates across UDiFF, Legacy FO, and CM spot data (`DATE1`/`TIMESTAMP`).
+* **Multi-Symbol Spot Fallback Priority**: Spot price enrichment queries primary CM SEC, followed by alternate CM SEC, and finally legacy CM Bhavcopy archives, tracking missing symbols dynamically until all symbols have spot or all sources are exhausted. Authoritative spot strictly uses official CM closing prices (`CLOSE_PRICE` or `CLOSE`).
+* **Domain-Accurate Circuit Breakers**: Circuit breaker counters track failures strictly by target host domain (`_extractHost`) rather than arbitrary labels, isolating connection issues cleanly.
 
 ---
 

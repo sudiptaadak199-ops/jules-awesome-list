@@ -18,26 +18,22 @@
  *    - Legacy FO: Requires TIMESTAMP column when expectedDateKey is supplied. Never bypasses date validation.
  *    - UDiFF Futures & Legacy FO: Contracts with missing, invalid, zero, or negative closing prices are rejected BEFORE creating symbolsData or pushing to contracts.
  *      Never appends contracts with null/invalid closePrice. Never substitutes SttlmPric/SETTLE_PR.
- * 4. Multi-Tier Archive Fallback:
+ * 4. Multi-Tier Archive & Spot Fallback:
  *    - If primary official archive returns HTTP 200 but CSV is invalid/unparseable, automatically attempts alternate official archive.
+ *    - Spot Enrichment: Iterates across CM SEC primary, CM SEC alternate, and legacy CM Bhavcopy archives until ALL required symbols missing spot have verified spot prices, or all sources are exhausted.
  * 5. Free Official Sources Only:
  *    - Modern UDiFF FO Bhavcopy via Cloudflare Worker or direct official archives.
  *    - Legacy FO Bhavcopy.
  *    - Official CM Bhavcopy (sec_bhavdata_full and legacy CM) for spot fallback.
  *    - Zero Yahoo Finance fallback, zero synthetic futures prices.
- * 6. Separate FinInstrmNm from FinInstrmId:
- *    - contractSymbol = FinInstrmNm only. Blank when unavailable. Never synthesize fake identifiers.
- *    - instrumentId = FinInstrmId.
- * 7. Strict ClsPric policy:
- *    - Uses official Futures Closing Price (ClsPric/CLOSE) only. Never substitutes SttlmPric/SETTLE_PR.
- * 8. Non-repetition & Circuit Breaker:
- *    - Tracks attempted URLs and fails fast if an endpoint repeatedly hangs or fails.
+ * 6. Hostname-Based Circuit Breakers & Non-Repetition:
+ *    - Tracks attempted URLs and circuit breaker failure counts strictly by parsed target host (domain name), avoiding label-based confusion.
  */
 
 var DataProvider = {
   _dailyBhavcopyCache: {},
   _attemptedUrls: {}, // Tracks URLs attempted in this execution to prevent repeated slow calls
-  _failedHostCount: {}, // Counts timeouts per host to trigger circuit breaker if host is hanging
+  _failedHostCount: {}, // Counts timeouts per parsed host to trigger circuit breaker if host is hanging
 
   STATUS: {
     SUCCESS: 'SUCCESS',
@@ -48,6 +44,19 @@ var DataProvider = {
     TIMEOUT: 'TIMEOUT',
     CIRCUIT_BROKEN: 'CIRCUIT_BROKEN',
     PARSING_ERROR: 'PARSING_ERROR'
+  },
+
+  /**
+   * Extracts hostname from a given URL for domain-accurate circuit breaking.
+   */
+  _extractHost: function(url) {
+    if (!url) return 'unknown';
+    try {
+      var match = url.match(/^https?:\/\/([^:\/\s]+)/i);
+      return match ? match[1].toLowerCase() : url;
+    } catch (e) {
+      return url;
+    }
   },
 
   /**
@@ -641,38 +650,50 @@ var DataProvider = {
     return result;
   },
 
+  /**
+   * Enriches spot prices for symbols missing spot (spotPrice === null).
+   * Continues fallback across primary CM, alternate CM, and legacy CM until all symbols
+   * have valid spot prices or all sources are exhausted.
+   * Tracks missing symbols dynamically. Never stops simply because appliedCount > 0.
+   */
   _enrichSpotPrices: function(dateObj, parsedData) {
-    var symbolsNeedingSpot = [];
-    var symKeys = Object.keys(parsedData.symbolsData);
-    for (var i = 0; i < symKeys.length; i++) {
-      var s = symKeys[i];
-      if (parsedData.symbolsData[s].spotPrice === null) {
-        symbolsNeedingSpot.push(s);
+    var getMissingSymbols = function() {
+      var missing = [];
+      var symKeys = Object.keys(parsedData.symbolsData);
+      for (var i = 0; i < symKeys.length; i++) {
+        var s = symKeys[i];
+        if (parsedData.symbolsData[s].spotPrice === null) {
+          missing.push(s);
+        }
       }
-    }
+      return missing;
+    };
 
+    var symbolsNeedingSpot = getMissingSymbols();
     if (symbolsNeedingSpot.length === 0) return;
 
     var ddmmyyyy = Utils.formatDDMMYYYY(dateObj);
     var dateKey = Utils.formatDateKey(dateObj);
+
+    // 1. Primary CM SEC Bhavcopy
     var cmUrl = CONFIG.URLS.NSE_CM_SEC.replace('{DDMMYYYY}', ddmmyyyy);
     var cmRes = this._fetchHttpText(cmUrl, 'NSE_CM_SEC');
-
-    var appliedCount = 0;
     if (cmRes.status === this.STATUS.SUCCESS && cmRes.text) {
-      appliedCount = this._parseAndApplySpotFromCmSec(cmRes.text, parsedData, symbolsNeedingSpot, dateKey);
+      this._parseAndApplySpotFromCmSec(cmRes.text, parsedData, symbolsNeedingSpot, dateKey);
+      symbolsNeedingSpot = getMissingSymbols();
+      if (symbolsNeedingSpot.length === 0) return;
     }
 
-    if (appliedCount === 0) {
-      var cmAltUrl = CONFIG.URLS.NSE_CM_SEC_ALT.replace('{DDMMYYYY}', ddmmyyyy);
-      cmRes = this._fetchHttpText(cmAltUrl, 'NSE_CM_SEC_ALT');
-      if (cmRes.status === this.STATUS.SUCCESS && cmRes.text) {
-        appliedCount = this._parseAndApplySpotFromCmSec(cmRes.text, parsedData, symbolsNeedingSpot, dateKey);
-      }
+    // 2. Alternate CM SEC Bhavcopy (if any symbols still need spot)
+    var cmAltUrl = CONFIG.URLS.NSE_CM_SEC_ALT.replace('{DDMMYYYY}', ddmmyyyy);
+    var cmAltRes = this._fetchHttpText(cmAltUrl, 'NSE_CM_SEC_ALT');
+    if (cmAltRes.status === this.STATUS.SUCCESS && cmAltRes.text) {
+      this._parseAndApplySpotFromCmSec(cmAltRes.text, parsedData, symbolsNeedingSpot, dateKey);
+      symbolsNeedingSpot = getMissingSymbols();
+      if (symbolsNeedingSpot.length === 0) return;
     }
 
-    if (appliedCount > 0) return;
-
+    // 3. Legacy CM Bhavcopy Archive (if any symbols still need spot)
     var yyyy = dateObj.getFullYear();
     var mmm = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][dateObj.getMonth()];
     var dd = ('0' + dateObj.getDate()).slice(-2);
@@ -865,16 +886,18 @@ var DataProvider = {
   },
 
   /**
-   * Safe HTTP text fetcher with circuit breaker, non-repetition, and timing diagnostic.
+   * Safe HTTP text fetcher with hostname-based circuit breaker, non-repetition, and timing diagnostic.
    */
   _fetchHttpText: function(url, sourceLabel, customHeaders) {
     if (this._attemptedUrls[url]) {
       return this._attemptedUrls[url];
     }
 
-    var label = sourceLabel || url;
-    if (this._failedHostCount[label] >= 2) {
-      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, text: null, error: 'Circuit breaker open for ' + label };
+    var host = this._extractHost(url);
+    var label = sourceLabel || host;
+
+    if (this._failedHostCount[host] >= 2) {
+      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, text: null, error: 'Circuit breaker open for host ' + host };
       this._attemptedUrls[url] = cbRes;
       return cbRes;
     }
@@ -896,7 +919,7 @@ var DataProvider = {
       });
       var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
-      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + '] Status ' + code + ' in ' + elapsed + 'ms');
+      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + ' (' + host + ')] Status ' + code + ' in ' + elapsed + 'ms');
 
       if (code === 200) {
         var successRes = { status: this.STATUS.SUCCESS, text: resp.getContentText(), error: null };
@@ -913,9 +936,9 @@ var DataProvider = {
       }
     } catch (e) {
       var errElapsed = new Date().getTime() - startTime;
-      this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
+      this._failedHostCount[host] = (this._failedHostCount[host] || 0) + 1;
       var safeError = (e.message || '').replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
-      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + safeError);
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + ' (' + host + ')] Exception after ' + errElapsed + 'ms: ' + safeError);
 
       var isTimeout = safeError.indexOf('timed out') !== -1 || safeError.indexOf('Timeout') !== -1;
       var failRes = {
@@ -929,16 +952,18 @@ var DataProvider = {
   },
 
   /**
-   * Safe ZIP download and unzip with circuit breaker, non-repetition, and timing diagnostic.
+   * Safe ZIP download and unzip with hostname-based circuit breaker, non-repetition, and timing diagnostic.
    */
   _fetchAndUnzipCsv: function(url, sourceLabel, customHeaders) {
     if (this._attemptedUrls[url]) {
       return this._attemptedUrls[url];
     }
 
-    var label = sourceLabel || url;
-    if (this._failedHostCount[label] >= 2) {
-      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, csvText: null, error: 'Circuit breaker open for ' + label };
+    var host = this._extractHost(url);
+    var label = sourceLabel || host;
+
+    if (this._failedHostCount[host] >= 2) {
+      var cbRes = { status: this.STATUS.CIRCUIT_BROKEN, csvText: null, error: 'Circuit breaker open for host ' + host };
       this._attemptedUrls[url] = cbRes;
       return cbRes;
     }
@@ -960,17 +985,28 @@ var DataProvider = {
       });
       var elapsed = new Date().getTime() - startTime;
       var code = resp.getResponseCode();
-      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + '] Status ' + code + ' in ' + elapsed + 'ms');
+      SheetManager.log('INFO', 'HTTP_DIAGNOSTIC', '[' + label + ' (' + host + ')] Status ' + code + ' in ' + elapsed + 'ms');
 
       if (code === 200) {
         var blob = resp.getBlob();
         var unzippedBlobs = Utilities.unzip(blob);
         if (unzippedBlobs && unzippedBlobs.length > 0) {
-          var successRes = { status: this.STATUS.SUCCESS, csvText: unzippedBlobs[0].getDataAsString(), error: null };
-          this._attemptedUrls[url] = successRes;
-          return successRes;
+          // Identify expected FO or CM CSV file
+          var csvText = null;
+          for (var b = 0; b < unzippedBlobs.length; b++) {
+            var bName = unzippedBlobs[b].getName ? unzippedBlobs[b].getName() : '';
+            if (/\.csv$/i.test(bName) || unzippedBlobs.length === 1) {
+              csvText = unzippedBlobs[b].getDataAsString();
+              break;
+            }
+          }
+          if (csvText !== null) {
+            var successRes = { status: this.STATUS.SUCCESS, csvText: csvText, error: null };
+            this._attemptedUrls[url] = successRes;
+            return successRes;
+          }
         }
-        var parseErr = { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty zip file (' + elapsed + 'ms)' };
+        var parseErr = { status: this.STATUS.PARSING_ERROR, csvText: null, error: 'Empty or invalid zip contents (' + elapsed + 'ms)' };
         this._attemptedUrls[url] = parseErr;
         return parseErr;
       } else if (code === 404) {
@@ -984,9 +1020,9 @@ var DataProvider = {
       }
     } catch (e) {
       var errElapsed = new Date().getTime() - startTime;
-      this._failedHostCount[label] = (this._failedHostCount[label] || 0) + 1;
+      this._failedHostCount[host] = (this._failedHostCount[host] || 0) + 1;
       var safeError = (e.message || '').replace(/Bearer\s+[A-Za-z0-9_.~+-]+/gi, 'Bearer [REDACTED]');
-      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + '] Exception after ' + errElapsed + 'ms: ' + safeError);
+      SheetManager.log('ERROR', 'HTTP_DIAGNOSTIC', '[' + label + ' (' + host + ')] Exception after ' + errElapsed + 'ms: ' + safeError);
 
       var isTimeout = safeError.indexOf('timed out') !== -1 || safeError.indexOf('Timeout') !== -1;
       var failRes = {

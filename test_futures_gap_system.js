@@ -636,16 +636,26 @@ runTest('DataProvider logs exact source label and elapsed time in diagnostic log
   DataProvider._attemptedUrls = {};
   DataProvider._failedHostCount = {};
 
-  global.UrlFetchApp = {
-    fetch: (url) => ({
-      getResponseCode: () => 200,
-      getContentText: () => 'SYMBOL,SERIES\nRELIANCE,EQ\n'
-    })
+  let capturedLogs = [];
+  const origLog = SheetManager.log;
+  SheetManager.log = (level, cat, msg) => {
+    capturedLogs.push({ level, cat, msg });
   };
 
-  DataProvider._fetchHttpText('https://archives.nseindia.com/diag_test.csv', 'DIAGNOSTIC_LABEL');
-  // Check Logs in SheetManager
-  assert(true, 'Diagnostic log generated');
+  try {
+    global.UrlFetchApp = {
+      fetch: (url) => ({
+        getResponseCode: () => 200,
+        getContentText: () => 'SYMBOL,SERIES\nRELIANCE,EQ\n'
+      })
+    };
+
+    DataProvider._fetchHttpText('https://archives.nseindia.com/diag_test.csv', 'DIAGNOSTIC_LABEL');
+    assert(capturedLogs.length > 0, 'Diagnostic log must be generated');
+    assert(capturedLogs.some(l => l.cat === 'HTTP_DIAGNOSTIC' && l.msg.includes('DIAGNOSTIC_LABEL') && l.msg.includes('Status 200')));
+  } finally {
+    SheetManager.log = origLog;
+  }
 });
 
 // 25. testCloudflareWorkerIntegration in IntegrationTest.gs executes and validates cleanly
@@ -1218,6 +1228,74 @@ runTest('Test H: Valid records still parse successfully with genuine FinInstrmNm
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].closePrice, 1467.00);
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[1].contractSymbol, 'RELIANCE26JUNFUT');
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[1].closePrice, 1476.30);
+});
+
+// 49. Dynamic multi-symbol partial CM Spot fallback across multiple sources
+runTest('DataProvider._enrichSpotPrices dynamically queries alternate sources for remaining missing symbols', () => {
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  const primaryCm = 'SYMBOL,SERIES,CLOSE_PRICE,DATE1\nRELIANCE,EQ,1465.50,04-MAY-2026\n';
+  const altCm = 'SYMBOL,SERIES,CLOSE_PRICE,DATE1\nTCS,EQ,3910.00,04-MAY-2026\n';
+
+  const origFetchHttp = DataProvider._fetchHttpText;
+  let requestedUrls = [];
+
+  try {
+    DataProvider._fetchHttpText = (url, label) => {
+      requestedUrls.push(url);
+      if (url.includes('nsearchives.nseindia.com')) {
+        // Primary returns RELIANCE only
+        return { status: DataProvider.STATUS.SUCCESS, text: primaryCm };
+      } else {
+        // Alt returns TCS
+        return { status: DataProvider.STATUS.SUCCESS, text: altCm };
+      }
+    };
+
+    const parsedData = {
+      symbolsData: {
+        RELIANCE: { spotPrice: null },
+        TCS: { spotPrice: null }
+      }
+    };
+
+    DataProvider._enrichSpotPrices(new Date('2026-05-04'), parsedData);
+    assert.strictEqual(parsedData.symbolsData.RELIANCE.spotPrice, 1465.50);
+    assert.strictEqual(parsedData.symbolsData.TCS.spotPrice, 3910.00);
+    assert(requestedUrls.length >= 2, 'Should query secondary archive because TCS was still missing after primary');
+  } finally {
+    DataProvider._fetchHttpText = origFetchHttp;
+  }
+});
+
+// 50. Circuit breaker is keyed by parsed host domain rather than label string
+runTest('DataProvider circuit breaker tracks failure counts strictly by target host', () => {
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  const host1 = DataProvider._extractHost('https://nsearchives.nseindia.com/content/fo/test1.zip');
+  const host2 = DataProvider._extractHost('https://archives.nseindia.com/content/fo/test2.zip');
+  assert.strictEqual(host1, 'nsearchives.nseindia.com');
+  assert.strictEqual(host2, 'archives.nseindia.com');
+  assert.notStrictEqual(host1, host2);
+
+  // Simulate 2 failures on host1
+  DataProvider._failedHostCount[host1] = 2;
+  const cbRes = DataProvider._fetchHttpText('https://nsearchives.nseindia.com/content/fo/test3.zip', 'SOME_LABEL');
+  assert.strictEqual(cbRes.status, DataProvider.STATUS.CIRCUIT_BROKEN);
+  assert(cbRes.error.includes('nsearchives.nseindia.com'));
+
+  // Host2 must NOT be broken
+  DataProvider._attemptedUrls = {};
+  const origFetch = global.UrlFetchApp.fetch;
+  try {
+    global.UrlFetchApp.fetch = () => ({ getResponseCode: () => 200, getContentText: () => 'OK' });
+    const okRes = DataProvider._fetchHttpText('https://archives.nseindia.com/content/fo/test4.zip', 'SOME_LABEL');
+    assert.strictEqual(okRes.status, DataProvider.STATUS.SUCCESS);
+  } finally {
+    global.UrlFetchApp.fetch = origFetch;
+  }
 });
 
 console.log(`\n==========================================`);

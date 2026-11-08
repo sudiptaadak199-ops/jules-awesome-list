@@ -182,9 +182,12 @@ runTest('DataProvider.parseUdiffFOCsv extracts actual FinInstrmNm and ClsPric co
 runTest('DataProvider.parseUdiffFOCsv rejects records with blank contract identifiers', () => {
   const badCsv = `TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
 2026-05-04,2026-05-04,FO,NSE,STF,,,RELIANCE,,2026-05-26,2026-05-26,0.00,XX,,1460.00,1470.00,1458.00,1467.00,1467.00,1460.00,1463.10,1467.00,10000,0,500,600000.00,10,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,1003,,TCS,,2026-05-26,2026-05-26,0.00,XX,TCS26MAYFUT,3900.00,3920.00,3890.00,3910.00,3910.00,3900.00,3905.00,3910.00,5000,0,100,100000.00,5,F1,175,,,,,
 `;
   const parsed = DataProvider.parseUdiffFOCsv(badCsv, '2026-05-04');
+  assert(parsed !== null, 'CSV should parse since TCS is valid');
   assert.strictEqual(parsed.symbolsData.RELIANCE, undefined, 'Records with blank contract symbol must be rejected');
+  assert(parsed.symbolsData.TCS !== undefined, 'Valid TCS record must be accepted');
 });
 
 // 4. Missing Close Price policy: Settlement Price not silently substituted
@@ -202,9 +205,12 @@ runTest('Missing ClsPric never uses SttlmPric in DataProvider', () => {
 runTest('Missing FinInstrmNm never creates a fake symbol', () => {
   const noNameCsv = `TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
 2026-05-04,2026-05-04,FO,NSE,STF,99999,,RELIANCE,,2026-05-26,2026-05-26,0.00,XX,,1460.00,1470.00,1458.00,1467.00,1467.00,1460.00,1463.10,1467.00,10000,0,500,600000.00,10,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,1003,,TCS,,2026-05-26,2026-05-26,0.00,XX,TCS26MAYFUT,3900.00,3920.00,3890.00,3910.00,3910.00,3900.00,3905.00,3910.00,5000,0,100,100000.00,5,F1,175,,,,,
 `;
   const parsed = DataProvider.parseUdiffFOCsv(noNameCsv, '2026-05-04');
+  assert(parsed !== null, 'CSV should parse since TCS is valid');
   assert.strictEqual(parsed.symbolsData.RELIANCE, undefined, 'Record without FinInstrmNm must be rejected and not synthesized');
+  assert(parsed.symbolsData.TCS !== undefined, 'Valid TCS record must be accepted');
 });
 
 // 6. FinInstrmId is never treated as a contract symbol
@@ -882,6 +888,79 @@ runTest('DataProvider falls back to direct archives if Cloudflare Worker returns
   assert.strictEqual(res.status, 'SUCCESS');
   assert(attemptedUrls.some(u => u.includes('sa-futures-gap-proxy')), 'Worker relay was called first');
   assert(attemptedUrls.some(u => u.includes('nsearchives.nseindia.com')), 'Direct archive fallback was invoked when Worker CSV parse failed');
+  assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].contractSymbol, 'RELIANCE26NOVFUT');
+});
+
+// 32. parseCsvLine rejects unmatched quotes and invalid characters after closing quotes
+runTest('DataProvider.parseCsvLine rejects malformed quotes and trailing garbage', () => {
+  // Unmatched opening quote
+  const unclosed = '2026-05-04,"RELIANCE,STF';
+  assert.strictEqual(DataProvider.parseCsvLine(unclosed), null);
+
+  // Invalid characters after closing quote before comma
+  const trailingGarbage = '2026-05-04,"RELIANCE"GARBAGE,STF';
+  assert.strictEqual(DataProvider.parseCsvLine(trailingGarbage), null);
+
+  // Stray quote in unquoted field
+  const strayQuote = '2026-05-04,RELI"ANCE,STF';
+  assert.strictEqual(DataProvider.parseCsvLine(strayQuote), null);
+});
+
+// 33. Strict date validation rejects 0 matched records even on short 1-line file
+runTest('DataProvider.parseUdiffFOCsv rejects CSV with 0 matched dates regardless of line count', () => {
+  const shortMismatch = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-05-01,RELIANCE,STF,RELIANCE26MAYFUT,1467.00,1463.10,2026-05-26\n';
+  const res = DataProvider.parseUdiffFOCsv(shortMismatch, '2026-05-04');
+  assert.strictEqual(res, null, 'Must reject even short CSV if 0 records match expected date');
+});
+
+// 34. Require at least one valid stock-futures record before returning SUCCESS
+runTest('DataProvider.parseUdiffFOCsv rejects CSV with zero valid stock-futures records', () => {
+  // CSV containing only Index Futures (IDF), no stock futures (STF)
+  const indexOnlyCsv = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-05-04,NIFTY,IDF,NIFTY26MAYFUT,24000.00,24050.00,2026-05-26\n';
+  const res = DataProvider.parseUdiffFOCsv(indexOnlyCsv, '2026-05-04');
+  assert.strictEqual(res, null, 'Must reject CSV containing zero stock futures');
+});
+
+// 35. Primary archive returning HTTP 200 with invalid CSV triggers fallback to alternate archive
+runTest('DataProvider falls back to alternate archive when primary archive returns 200 with invalid CSV', () => {
+  DataProvider._dailyBhavcopyCache = {};
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  mockScriptProperties = {}; // No worker configured, straight to archives
+
+  const corruptArchiveCsv = 'Invalid,Corrupt,Header\n1,2,3\n';
+  const validAltCsv = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-11-06,RELIANCE,STF,RELIANCE26NOVFUT,1323.00,1319.99,2026-11-23\n';
+
+  let attemptedUrls = [];
+
+  global.UrlFetchApp = {
+    fetch: (url, opts) => {
+      attemptedUrls.push(url);
+      return {
+        getResponseCode: () => 200,
+        getBlob: () => ({ getBytes: () => [0x50, 0x4B, 0x03, 0x04] })
+      };
+    }
+  };
+
+  let callCount = 0;
+  global.Utilities = {
+    unzip: () => {
+      callCount++;
+      if (callCount === 1) {
+        return [{ getDataAsString: () => corruptArchiveCsv }];
+      } else {
+        return [{ getDataAsString: () => validAltCsv }];
+      }
+    }
+  };
+
+  const dt = new Date('2026-11-06');
+  const res = DataProvider._fetchNSEUdiffFO(dt);
+  assert.strictEqual(res.status, 'SUCCESS');
+  assert(attemptedUrls.some(u => u.includes('nsearchives.nseindia.com')), 'Primary archive attempted');
+  assert(attemptedUrls.some(u => u.includes('archives.nseindia.com')), 'Alternate archive attempted after primary CSV failed');
   assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].contractSymbol, 'RELIANCE26NOVFUT');
 });
 

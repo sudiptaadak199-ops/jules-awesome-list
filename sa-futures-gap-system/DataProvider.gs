@@ -11,12 +11,13 @@
  * 2. Robust & Strict RFC-4180 CSV Parsing:
  *    - Handles UTF-8 BOM (\uFEFF) in headers.
  *    - Custom RFC-4180 parser rejecting unmatched quotes, malformed quoted fields, and invalid characters after closing quotes.
- *    - Enforces row column counts against header definitions, rejecting truncated rows.
+ *    - Enforces exact row column counts against header definitions (cols.length !== expectedColCount), rejecting both truncated and extra-column rows.
  * 3. Strict CSV Header & Trading Date Validation:
+ *    - CM SEC Spot: Detects DATE1 and TIMESTAMP. Requires at least one when expectedDateKey is supplied; rejects the file if neither exists. Rejects blank/invalid/mismatched row dates.
+ *    - Legacy CM Spot: Requires TIMESTAMP when expectedDateKey is supplied; rejects the file if missing. Rejects blank/invalid/mismatched row dates.
  *    - Legacy FO: Requires TIMESTAMP column when expectedDateKey is supplied. Never bypasses date validation.
- *    - CM Spot: When DATE1 or TIMESTAMP exists, rejects rows with missing/invalid/mismatched dates. Never applies unverified spot prices.
- *    - UDiFF Futures: Valid records strictly require non-empty FinInstrmNm, valid expiry, valid symbol, and positive ClsPric.
- *      Missing or invalid ClsPric is never counted as a valid record and SttlmPric is never substituted.
+ *    - UDiFF Futures & Legacy FO: Contracts with missing, invalid, zero, or negative closing prices are rejected BEFORE creating symbolsData or pushing to contracts.
+ *      Never appends contracts with null/invalid closePrice. Never substitutes SttlmPric/SETTLE_PR.
  * 4. Multi-Tier Archive Fallback:
  *    - If primary official archive returns HTTP 200 but CSV is invalid/unparseable, automatically attempts alternate official archive.
  * 5. Free Official Sources Only:
@@ -353,8 +354,9 @@ var DataProvider = {
   /**
    * Parses official NSE UDiFF FO Bhavcopy CSV text with robust quoted-field parsing,
    * strict header validation, trading date matching, and strict ClsPric policy.
-   * Counts valid records ONLY when genuine FinInstrmNm, valid expiry, valid symbol,
-   * and positive ClsPric are present. Never substitutes SttlmPric.
+   * Enforces exact column count per row (cols.length === expectedColCount).
+   * Rejects contracts BEFORE creating symbolsData or pushing to contracts if ClsPric
+   * is missing, invalid, zero, or negative. Never appends invalid contracts. Never substitutes SttlmPric.
    */
   parseUdiffFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
@@ -398,15 +400,15 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      // Enforce row column count consistency against headers
-      if (!cols || cols.length < expectedColCount) continue;
+      // Exact column-count validation: reject malformed rows with missing OR extra columns
+      if (!cols || cols.length !== expectedColCount) continue;
 
       // Trading date validation: verify file contains data matching the expected date
       if (expectedDateKey && colIdx.tradDt !== -1) {
-        var rowTradDt = Utils.parseDate(cols[colIdx.tradDt]);
-        if (!rowTradDt) {
-          continue;
-        }
+        var rawTradDt = cols[colIdx.tradDt];
+        if (!rawTradDt) continue;
+        var rowTradDt = Utils.parseDate(rawTradDt);
+        if (!rowTradDt) continue;
         var rowDateKey = Utils.formatDateKey(rowTradDt);
         if (rowDateKey !== expectedDateKey) {
           continue; // strictly ignore records not matching target date
@@ -437,10 +439,15 @@ var DataProvider = {
       var expiryKey = Utils.formatDateKey(expiryDate);
 
       // Official ClsPric policy: closing price only. Never substitute SttlmPric.
+      // Reject early before creating symbolsData or pushing to contracts if ClsPric is missing, invalid, zero, or negative.
       var rawClose = Utils.safeFloat(cols[colIdx.clsPric]);
-      var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
-      var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
+      if (rawClose === null || rawClose <= 0) {
+        continue;
+      }
+      var closePrice = rawClose;
 
+      // Supplementary settlement price only for otherwise valid contracts
+      var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
       var undrlygPrice = (colIdx.undrlygPric !== -1) ? Utils.safeFloat(cols[colIdx.undrlygPric]) : null;
 
       if (!result.symbolsData[symbol]) {
@@ -459,17 +466,14 @@ var DataProvider = {
         expiryDate: expiryDate,
         closePrice: closePrice,
         settlePrice: settlePrice,
-        priceSource: closePrice !== null ? 'ClsPric' : (settlePrice !== null ? 'SttlmPric_Only' : 'NONE'),
+        priceSource: 'ClsPric',
         underlyingPrice: undrlygPrice
       });
 
-      // Valid record criterion: genuine FinInstrmNm, valid expiry, valid symbol, and positive ClsPric
-      if (closePrice !== null && closePrice > 0) {
-        validRecords++;
-      }
+      validRecords++;
     }
 
-    // Strict trading date validation: if expectedDateKey specified, reject if 0 matched records regardless of line count
+    // Strict trading date validation: if expectedDateKey specified, reject if 0 matched records
     if (expectedDateKey && matchedDateCount === 0) {
       SheetManager.log('WARN', 'CSV_PARSE', 'UDiFF CSV date validation failed: 0 records matched expected date ' + expectedDateKey);
       return null;
@@ -513,7 +517,10 @@ var DataProvider = {
   /**
    * Parses official NSE Legacy FO Bhavcopy CSV text with robust quoted-field parsing,
    * header validation, strict date matching, and requiring at least 1 valid stock-futures record.
+   * Enforces exact column count per row (cols.length === expectedColCount).
    * Requires TIMESTAMP column when expectedDateKey is supplied. Never bypasses date validation.
+   * Rejects contracts BEFORE creating symbolsData or pushing to contracts if CLOSE is missing,
+   * invalid, zero, or negative. Never appends invalid contracts. Never substitutes SETTLE_PR.
    */
   parseLegacyFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
@@ -558,16 +565,14 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      // Enforce row column count consistency against headers
-      if (!cols || cols.length < expectedColCount) continue;
+      // Exact column-count validation: reject malformed rows with missing OR extra columns
+      if (!cols || cols.length !== expectedColCount) continue;
 
       if (expectedDateKey && colIdx.timestamp !== -1) {
         var rawTs = cols[colIdx.timestamp];
         if (!rawTs) continue;
         var rowDt = Utils.parseDate(rawTs);
-        if (!rowDt) {
-          continue;
-        }
+        if (!rowDt) continue;
         var rowKey = Utils.formatDateKey(rowDt);
         if (rowKey !== expectedDateKey) {
           continue; // strictly ignore records not matching target date
@@ -592,8 +597,14 @@ var DataProvider = {
       // Do NOT synthesize fake identifiers. Mark contractSymbol as '' (MISSING).
       var contractSymbol = '';
 
+      // Reject early before creating symbolsData or pushing to contracts if CLOSE is missing, invalid, zero, or negative.
       var rawClose = Utils.safeFloat(cols[colIdx.close]);
-      var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
+      if (rawClose === null || rawClose <= 0) {
+        continue;
+      }
+      var closePrice = rawClose;
+
+      // Supplementary settlement price only
       var settlePrice = (colIdx.settlePr !== -1) ? Utils.safeFloat(cols[colIdx.settlePr]) : null;
 
       if (!result.symbolsData[symbol]) {
@@ -610,13 +621,11 @@ var DataProvider = {
         expiryDate: expiryDate,
         closePrice: closePrice, // Strictly CLOSE price; never SETTLE_PR
         settlePrice: settlePrice,
-        priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
+        priceSource: 'CLOSE',
         underlyingPrice: null
       });
 
-      if (closePrice !== null && closePrice > 0) {
-        validRecords++;
-      }
+      validRecords++;
     }
 
     if (expectedDateKey && matchedDateCount === 0) {
@@ -625,7 +634,7 @@ var DataProvider = {
     }
 
     if (validRecords === 0) {
-      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV contains zero valid stock-futures records');
+      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV contains zero valid stock-futures records with positive closing price');
       return null;
     }
 
@@ -682,8 +691,12 @@ var DataProvider = {
 
   /**
    * Parse and apply spot prices from official CM sec_bhavdata_full CSV.
-   * When DATE1 exists, strictly rejects rows with missing, invalid, or mismatched dates.
-   * Never applies spot prices from an unverified date.
+   * Supported date columns: DATE1 or TIMESTAMP.
+   * If expectedDateKey is supplied, at least one supported date column MUST exist.
+   * If neither exists, reject the entire file and return 0.
+   * Enforces exact row column count (cols.length === expectedColCount).
+   * Validates every accepted row's date strictly. Rejects blank, invalid, or mismatched dates.
+   * Never applies unverified spot prices.
    */
   _parseAndApplySpotFromCmSec: function(cmText, parsedData, targetSymbols, expectedDateKey) {
     if (!cmText) return 0;
@@ -698,9 +711,19 @@ var DataProvider = {
     var symIdx = headers.indexOf('SYMBOL');
     var seriesIdx = headers.indexOf('SERIES');
     var closeIdx = headers.indexOf('CLOSE_PRICE');
-    var dateIdx = headers.indexOf('DATE1');
+
+    // Detect DATE1 and TIMESTAMP as supported date columns
+    var date1Idx = headers.indexOf('DATE1');
+    var tsIdx = headers.indexOf('TIMESTAMP');
+    var dateColIdx = date1Idx !== -1 ? date1Idx : tsIdx;
 
     if (symIdx === -1 || closeIdx === -1) return 0;
+
+    // If expectedDateKey is supplied, at least one supported date column MUST exist
+    if (expectedDateKey && dateColIdx === -1) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'CM SEC CSV missing required DATE1 or TIMESTAMP column for date validation');
+      return 0;
+    }
 
     var targetSet = {};
     for (var k = 0; k < targetSymbols.length; k++) {
@@ -713,16 +736,16 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      // Enforce row column count consistency against headers
-      if (!cols || cols.length < expectedColCount) continue;
+      // Exact column-count validation: reject malformed rows with missing OR extra columns
+      if (!cols || cols.length !== expectedColCount) continue;
 
-      // When DATE1 exists, reject rows with missing, invalid, or mismatched dates
-      if (dateIdx !== -1) {
-        var rawDate = cols[dateIdx];
-        if (!rawDate) continue; // reject missing date
+      // Strict row-level date validation
+      if (expectedDateKey && dateColIdx !== -1) {
+        var rawDate = cols[dateColIdx];
+        if (!rawDate) continue; // reject blank date
         var rowDt = Utils.parseDate(rawDate);
         if (!rowDt) continue; // reject invalid date
-        if (expectedDateKey && Utils.formatDateKey(rowDt) !== expectedDateKey) {
+        if (Utils.formatDateKey(rowDt) !== expectedDateKey) {
           continue; // reject mismatched date
         }
       }
@@ -744,8 +767,11 @@ var DataProvider = {
 
   /**
    * Parse and apply spot prices from official legacy CM Bhavcopy CSV.
-   * When TIMESTAMP exists, strictly rejects rows with missing, invalid, or mismatched dates.
-   * Never applies spot prices from an unverified date.
+   * Requires TIMESTAMP column when expectedDateKey is supplied.
+   * If missing, reject the entire file and return 0.
+   * Enforces exact row column count (cols.length === expectedColCount).
+   * Validates every accepted row's date strictly. Rejects blank, invalid, or mismatched dates.
+   * Never applies unverified spot prices.
    */
   _parseAndApplySpotFromLegacyCm: function(cmText, parsedData, targetSymbols, expectedDateKey) {
     if (!cmText) return 0;
@@ -764,6 +790,12 @@ var DataProvider = {
 
     if (symIdx === -1 || closeIdx === -1) return 0;
 
+    // Require TIMESTAMP column when expectedDateKey is provided. If missing, reject entire file.
+    if (expectedDateKey && tsIdx === -1) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy CM CSV missing required TIMESTAMP column for date validation');
+      return 0;
+    }
+
     var targetSet = {};
     for (var k = 0; k < targetSymbols.length; k++) {
       targetSet[targetSymbols[k].toUpperCase()] = true;
@@ -775,16 +807,16 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      // Enforce row column count consistency against headers
-      if (!cols || cols.length < expectedColCount) continue;
+      // Exact column-count validation: reject malformed rows with missing OR extra columns
+      if (!cols || cols.length !== expectedColCount) continue;
 
-      // When TIMESTAMP exists, reject rows with missing, invalid, or mismatched dates
-      if (tsIdx !== -1) {
+      // Strict row-level date validation
+      if (expectedDateKey && tsIdx !== -1) {
         var rawTs = cols[tsIdx];
-        if (!rawTs) continue; // reject missing date
+        if (!rawTs) continue; // reject blank date
         var rowDt = Utils.parseDate(rawTs);
         if (!rowDt) continue; // reject invalid date
-        if (expectedDateKey && Utils.formatDateKey(rowDt) !== expectedDateKey) {
+        if (Utils.formatDateKey(rowDt) !== expectedDateKey) {
           continue; // reject mismatched date
         }
       }

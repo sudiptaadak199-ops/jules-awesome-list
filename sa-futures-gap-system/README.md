@@ -81,7 +81,8 @@ The historical backfill is **not** started automatically upon project initializa
 
 * **Futures Price Field Used**: Official Futures Closing Price (`ClsPric` in UDiFF / `CLOSE` in legacy).
 * **No Silent Substitution**: The system **never** silently substitutes Settlement Price (`SttlmPric`) for Closing Price.
-* **Missing Closing Price Handling**: If `ClsPric` is missing or `<= 0`, the record's `closePrice` remains `null`. The mapping is marked `INCOMPLETE` and retained for subsequent recovery cycles.
+* **Missing Closing Price Handling**: If `ClsPric` is missing or `<= 0`, the contract record is rejected early before `symbolsData` or contract creation. It is never appended with null or invalid prices.
+* **Exact CSV Column & Date Validation**: Every parser validates exact row column counts against header schema (`cols.length === expectedColCount`). Rejects missing, invalid, or mismatched dates across UDiFF, Legacy FO, and CM spot data (`DATE1`/`TIMESTAMP`).
 
 ---
 

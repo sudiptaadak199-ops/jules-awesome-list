@@ -792,6 +792,99 @@ runTest('DataProvider falls back to direct NSE archives when Cloudflare Worker r
   assert.strictEqual(res.data.symbolsData.TCS.contracts[0].contractSymbol, 'TCS26NOVFUT');
 });
 
+// 28. Robust quoted-field CSV parsing with commas inside quotes and escaped quotes
+runTest('DataProvider.parseCsvLine handles quoted fields, inner commas, and escaped quotes correctly', () => {
+  const line1 = '2026-05-04,"RELIANCE, LTD",STF,"RELIANCE26MAYFUT",1467.00';
+  const parsed1 = DataProvider.parseCsvLine(line1);
+  assert.deepStrictEqual(parsed1, ['2026-05-04', 'RELIANCE, LTD', 'STF', 'RELIANCE26MAYFUT', '1467.00']);
+
+  const line2 = '"Item with ""escaped"" quotes",42,"Simple text"';
+  const parsed2 = DataProvider.parseCsvLine(line2);
+  assert.deepStrictEqual(parsed2, ['Item with "escaped" quotes', '42', 'Simple text']);
+
+  // Edge case: Empty fields
+  const line3 = 'A,,C,""';
+  const parsed3 = DataProvider.parseCsvLine(line3);
+  assert.deepStrictEqual(parsed3, ['A', '', 'C', '']);
+});
+
+// 29. CSV header validation rejects malformed or missing headers
+runTest('DataProvider.parseUdiffFOCsv rejects CSV missing mandatory headers', () => {
+  // Missing ClsPric
+  const badHeadersCsv = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,XpryDt\n2026-05-04,RELIANCE,STF,RELIANCE26MAYFUT,2026-05-26\n';
+  const parsed = DataProvider.parseUdiffFOCsv(badHeadersCsv, '2026-05-04');
+  assert.strictEqual(parsed, null, 'Must reject CSV missing ClsPric');
+});
+
+// 30. Trading date validation rejects mismatched date payloads
+runTest('DataProvider.parseUdiffFOCsv rejects CSV when trading date mismatches expected date', () => {
+  const mismatchCsv = `TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
+2026-05-01,2026-05-01,FO,NSE,STF,1001,,RELIANCE,,2026-05-26,2026-05-26,0.00,XX,RELIANCE26MAYFUT,1460.00,1470.00,1458.00,1467.00,1467.00,1460.00,1463.10,1467.00,10000,0,500,600000.00,10,F1,250,,,,,
+2026-05-01,2026-05-01,FO,NSE,STF,1002,,RELIANCE,,2026-06-30,2026-06-30,0.00,XX,RELIANCE26JUNFUT,1470.00,1478.00,1468.00,1476.30,1476.30,1470.00,1463.10,1476.30,5000,0,200,240000.00,5,F1,250,,,,,
+2026-05-01,2026-05-01,FO,NSE,STF,1003,,TCS,,2026-05-26,2026-05-26,0.00,XX,TCS26MAYFUT,3900.00,3920.00,3890.00,3910.00,3910.00,3900.00,3905.00,3910.00,5000,0,100,100000.00,5,F1,175,,,,,
+2026-05-01,2026-05-01,FO,NSE,STF,1004,,INFY,,2026-05-26,2026-05-26,0.00,XX,INFY26MAYFUT,1500.00,1520.00,1490.00,1510.00,1510.00,1500.00,1505.00,1510.00,5000,0,100,100000.00,5,F1,400,,,,,
+2026-05-01,2026-05-01,FO,NSE,STF,1005,,WIPRO,,2026-05-26,2026-05-26,0.00,XX,WIPRO26MAYFUT,450.00,455.00,448.00,452.00,452.00,450.00,451.00,452.00,5000,0,100,100000.00,5,F1,1500,,,,,
+2026-05-01,2026-05-01,FO,NSE,STF,1006,,HDFCBANK,,2026-05-26,2026-05-26,0.00,XX,HDFCBANK26MAYFUT,1700.00,1720.00,1690.00,1710.00,1710.00,1700.00,1705.00,1710.00,5000,0,100,100000.00,5,F1,550,,,,,
+`;
+  // Requested date is 2026-05-04, but CSV contains 2026-05-01
+  const parsed = DataProvider.parseUdiffFOCsv(mismatchCsv, '2026-05-04');
+  assert.strictEqual(parsed, null, 'Must reject CSV when no records match requested trading date');
+});
+
+// 31. Cloudflare Worker returning 200 with corrupt/invalid CSV triggers fallback to official archives
+runTest('DataProvider falls back to direct archives if Cloudflare Worker returns 200 but CSV parsing fails', () => {
+  DataProvider._dailyBhavcopyCache = {};
+  DataProvider._attemptedUrls = {};
+  DataProvider._failedHostCount = {};
+
+  mockScriptProperties = {
+    WORKER_URL: 'https://sa-futures-gap-proxy.sudiptaadak199.workers.dev',
+    API_TOKEN: 'super_secret_auth_token_123'
+  };
+
+  const corruptCsv = 'Corrupt,NonStandard,Payload\n1,2,3\n';
+  const validArchiveCsv = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt\n2026-11-06,RELIANCE,STF,RELIANCE26NOVFUT,1323.00,1319.99,2026-11-23\n';
+
+  let attemptedUrls = [];
+
+  global.UrlFetchApp = {
+    fetch: (url, opts) => {
+      attemptedUrls.push(url);
+      if (url.includes('sa-futures-gap-proxy')) {
+        // Worker returns 200 OK, but contents are corrupt
+        return {
+          getResponseCode: () => 200,
+          getBlob: () => ({ getBytes: () => [0x50, 0x4B, 0x03, 0x04] })
+        };
+      }
+      // Official archive fallback succeeds
+      return {
+        getResponseCode: () => 200,
+        getBlob: () => ({ getBytes: () => [0x50, 0x4B, 0x03, 0x04] })
+      };
+    }
+  };
+
+  let callCount = 0;
+  global.Utilities = {
+    unzip: () => {
+      callCount++;
+      if (callCount === 1) {
+        return [{ getDataAsString: () => corruptCsv }];
+      } else {
+        return [{ getDataAsString: () => validArchiveCsv }];
+      }
+    }
+  };
+
+  const dt = new Date('2026-11-06');
+  const res = DataProvider._fetchNSEUdiffFO(dt);
+  assert.strictEqual(res.status, 'SUCCESS');
+  assert(attemptedUrls.some(u => u.includes('sa-futures-gap-proxy')), 'Worker relay was called first');
+  assert(attemptedUrls.some(u => u.includes('nsearchives.nseindia.com')), 'Direct archive fallback was invoked when Worker CSV parse failed');
+  assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].contractSymbol, 'RELIANCE26NOVFUT');
+});
+
 console.log(`\n==========================================`);
 console.log(`ALL ${passedTests} OF ${totalTests} TESTS PASSED SUCCESSFULLY!`);
 console.log(`==========================================\n`);

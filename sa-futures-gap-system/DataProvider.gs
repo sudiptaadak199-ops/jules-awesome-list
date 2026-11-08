@@ -7,12 +7,12 @@
  *    - Dynamically reads WORKER_URL and API_TOKEN from PropertiesService.getScriptProperties().
  *    - Prioritizes secure authenticated relay: GET {WORKER_URL}/?date={YYYYMMDD} with Authorization: Bearer {API_TOKEN}.
  *    - Never hardcodes or logs API_TOKEN. Enforces HTTPS on WORKER_URL.
- *    - Gracefully falls back to direct NSE archives if Worker is not configured.
- * 2. Strict Execution Time Budgeting & Non-repetition:
- *    - Never retry the same slow/hanging URL repeatedly within one execution.
- *    - Tracks attempted URLs and fails fast if an endpoint previously hung or timed out.
- * 3. Clear Diagnostic Logs:
- *    - Logs exact source URL, HTTP status, and elapsed time in milliseconds.
+ *    - If Worker returns HTTP 200 but ZIP extraction, CSV validation, or parsing fails, falls back to official archives.
+ * 2. Robust Quoted-Field CSV Parsing:
+ *    - Custom RFC-4180 compliant CSV line parser handling quoted fields, commas inside quotes, escaped quotes (""), and surrounding spaces.
+ * 3. Strict CSV Header & Trading Date Validation:
+ *    - Validates required headers before parsing (rejects malformed or truncated Bhavcopies).
+ *    - Validates trading date (TradDt) in file to prevent mismatched payload ingestion.
  * 4. Free Official Sources Only:
  *    - Modern UDiFF FO Bhavcopy via Cloudflare Worker or direct official archives.
  *    - Legacy FO Bhavcopy.
@@ -23,6 +23,8 @@
  *    - instrumentId = FinInstrmId.
  * 6. Strict ClsPric policy:
  *    - Uses official Futures Closing Price (ClsPric) only. Never substitutes SttlmPric.
+ * 7. Non-repetition & Circuit Breaker:
+ *    - Tracks attempted URLs and fails fast if an endpoint repeatedly hangs or fails.
  */
 
 var DataProvider = {
@@ -39,6 +41,45 @@ var DataProvider = {
     TIMEOUT: 'TIMEOUT',
     CIRCUIT_BROKEN: 'CIRCUIT_BROKEN',
     PARSING_ERROR: 'PARSING_ERROR'
+  },
+
+  /**
+   * Robust RFC-4180 compliant CSV line parser.
+   * Handles commas within quotes, escaped double quotes (""), and trims outer whitespace.
+   */
+  parseCsvLine: function(line) {
+    if (!line) return [];
+    var fields = [];
+    var cur = '';
+    var inQuotes = false;
+    var len = line.length;
+
+    for (var i = 0; i < len; i++) {
+      var c = line[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (i + 1 < len && line[i + 1] === '"') {
+            cur += '"';
+            i++; // skip escaped quote
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          cur += c;
+        }
+      } else {
+        if (c === '"') {
+          inQuotes = true;
+        } else if (c === ',') {
+          fields.push(cur.trim());
+          cur = '';
+        } else {
+          cur += c;
+        }
+      }
+    }
+    fields.push(cur.trim());
+    return fields;
   },
 
   fetchDailyDataForDate: function(dateObj, targetSymbols) {
@@ -141,17 +182,19 @@ var DataProvider = {
 
   /**
    * Fetch and parse NSE UDiFF FO Bhavcopy.
-   * Priority:
+   * Priority & Fallback Logic:
    * 1. If WORKER_URL and API_TOKEN are configured in Script Properties, fetch through Cloudflare Worker relay.
-   * 2. Fall back to direct official NSE archive endpoints.
+   * 2. If Worker returns HTTP 200 but unzipping, CSV validation, or parsing fails, attempt official archives.
+   * 3. Fall back to direct official NSE archive endpoints (primary and alt).
    */
   _fetchNSEUdiffFO: function(dateObj) {
     var ymd = Utils.formatYYYYMMDD(dateObj);
     var dateKey = Utils.formatDateKey(dateObj);
 
     var res = null;
+    var parsedWorker = null;
 
-    // Check for Cloudflare Worker configuration in Script Properties
+    // 1. Attempt Cloudflare Worker relay if configured
     var workerConfig = this._getWorkerConfig();
     if (workerConfig && workerConfig.workerUrl && workerConfig.apiToken) {
       var relayUrl = workerConfig.workerUrl + '/?date=' + ymd;
@@ -160,46 +203,42 @@ var DataProvider = {
         'Accept': 'application/zip'
       };
       res = this._fetchAndUnzipCsv(relayUrl, 'CLOUDFLARE_WORKER_RELAY', authHeaders);
-    }
 
-    // If Worker relay succeeded, parse and return
-    if (res && res.status === this.STATUS.SUCCESS) {
-      var parsedWorker = this.parseUdiffFOCsv(res.csvText, dateKey);
-      if (parsedWorker) {
-        return { status: this.STATUS.SUCCESS, data: parsedWorker, error: null };
-      }
-    }
-
-    // Direct official NSE archive fallback (only if worker not configured or failed non-circuit-broken)
-    if (!res || (res.status !== this.STATUS.SUCCESS && res.status !== this.STATUS.CIRCUIT_BROKEN)) {
-      var primaryUrl = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
-      var directRes = this._fetchAndUnzipCsv(primaryUrl, 'NSE_UDIFF_PRIMARY');
-
-      if (directRes.status !== this.STATUS.SUCCESS && directRes.status !== this.STATUS.CIRCUIT_BROKEN) {
-        var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
-        var altRes = this._fetchAndUnzipCsv(altUrl, 'NSE_UDIFF_ALT');
-        if (altRes.status === this.STATUS.SUCCESS) {
-          directRes = altRes;
+      if (res.status === this.STATUS.SUCCESS && res.csvText) {
+        parsedWorker = this.parseUdiffFOCsv(res.csvText, dateKey);
+        if (parsedWorker) {
+          return { status: this.STATUS.SUCCESS, data: parsedWorker, error: null };
+        } else {
+          SheetManager.log('WARN', 'DATA_PROVIDER', 'Worker returned 200 but CSV parsing/validation failed for date ' + dateKey + '. Falling back to official archives.');
         }
-      }
-
-      if (directRes.status === this.STATUS.SUCCESS) {
-        res = directRes;
-      } else if (!res) {
-        res = directRes;
+      } else {
+        SheetManager.log('WARN', 'DATA_PROVIDER', 'Worker relay request failed for date ' + dateKey + ' (' + (res.error || res.status) + '). Falling back to official archives.');
       }
     }
 
-    if (!res || res.status !== this.STATUS.SUCCESS) {
-      return { status: res ? res.status : this.STATUS.NETWORK_ERROR, data: null, error: res ? res.error : 'Fetch failed' };
+    // 2. Direct official NSE archive fallback
+    var primaryUrl = CONFIG.URLS.NSE_UDIFF_FO.replace('{YYYYMMDD}', ymd);
+    var directRes = this._fetchAndUnzipCsv(primaryUrl, 'NSE_UDIFF_PRIMARY');
+
+    if (directRes.status !== this.STATUS.SUCCESS && directRes.status !== this.STATUS.CIRCUIT_BROKEN) {
+      var altUrl = CONFIG.URLS.NSE_UDIFF_FO_ALT.replace('{YYYYMMDD}', ymd);
+      var altRes = this._fetchAndUnzipCsv(altUrl, 'NSE_UDIFF_ALT');
+      if (altRes.status === this.STATUS.SUCCESS) {
+        directRes = altRes;
+      }
     }
 
-    var parsed = this.parseUdiffFOCsv(res.csvText, dateKey);
-    if (!parsed) {
-      return { status: this.STATUS.PARSING_ERROR, data: null, error: 'Failed to parse UDiFF CSV structure' };
+    if (directRes.status === this.STATUS.SUCCESS && directRes.csvText) {
+      var parsedDirect = this.parseUdiffFOCsv(directRes.csvText, dateKey);
+      if (parsedDirect) {
+        return { status: this.STATUS.SUCCESS, data: parsedDirect, error: null };
+      }
+      return { status: this.STATUS.PARSING_ERROR, data: null, error: 'Failed to parse UDiFF CSV from official archives' };
     }
 
-    return { status: this.STATUS.SUCCESS, data: parsed, error: null };
+    var finalErrorStatus = directRes.status !== this.STATUS.SUCCESS ? directRes.status : (res ? res.status : this.STATUS.NETWORK_ERROR);
+    var finalErrorMsg = directRes.error || (res ? res.error : 'Fetch failed');
+    return { status: finalErrorStatus, data: null, error: finalErrorMsg };
   },
 
   /**
@@ -232,13 +271,16 @@ var DataProvider = {
     }
   },
 
-  parseUdiffFOCsv: function(csvText, dateKey) {
+  /**
+   * Parses official NSE UDiFF FO Bhavcopy CSV text with robust quoted-field parsing,
+   * strict header validation, trading date matching, and strict ClsPric policy.
+   */
+  parseUdiffFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
     if (lines.length < 2) return null;
 
-    var headerLine = lines[0].trim();
-    var headers = headerLine.split(',').map(function(h) { return h.trim(); });
+    var headers = this.parseCsvLine(lines[0]);
 
     var colIdx = {
       tradDt: headers.indexOf('TradDt'),
@@ -253,22 +295,41 @@ var DataProvider = {
       undrlygPric: headers.indexOf('UndrlygPric')
     };
 
-    if (colIdx.tckrSymb === -1 || colIdx.xpryDt === -1) {
+    // Strict header validation: UDiFF FO Bhavcopy must contain core contract columns
+    if (colIdx.tradDt === -1 || colIdx.tckrSymb === -1 || colIdx.finInstrmTp === -1 ||
+        colIdx.finInstrmNm === -1 || colIdx.xpryDt === -1 || colIdx.clsPric === -1) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'UDiFF CSV header missing mandatory columns');
       return null;
     }
 
     var result = {
-      dateStr: dateKey,
+      dateStr: expectedDateKey,
       isTradingDay: true,
       symbolsData: {}
     };
 
+    var matchedDateCount = 0;
+    var validRecords = 0;
+
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      var cols = line.split(',');
+      var cols = this.parseCsvLine(line);
+      if (cols.length <= colIdx.tckrSymb) continue;
+
+      // Trading date validation: verify file contains data matching the expected date
+      if (expectedDateKey && colIdx.tradDt !== -1 && cols[colIdx.tradDt]) {
+        var rowTradDt = Utils.parseDate(cols[colIdx.tradDt]);
+        if (rowTradDt) {
+          var rowDateKey = Utils.formatDateKey(rowTradDt);
+          if (rowDateKey === expectedDateKey) {
+            matchedDateCount++;
+          }
+        }
+      }
 
       var instType = (cols[colIdx.finInstrmTp] || '').trim().toUpperCase();
+      // Strictly process stock futures (STF in modern UDiFF, FUTSTK in legacy)
       if (instType !== 'STF' && instType !== 'FUTSTK') {
         continue;
       }
@@ -276,6 +337,7 @@ var DataProvider = {
       var symbol = (cols[colIdx.tckrSymb] || '').trim().toUpperCase();
       if (!symbol) continue;
 
+      // Genuine FinInstrmNm only. Never synthesize or substitute with FinInstrmId.
       var contractSymbol = (colIdx.finInstrmNm !== -1 && cols[colIdx.finInstrmNm]) ? cols[colIdx.finInstrmNm].trim() : '';
       var instrumentId = (colIdx.finInstrmId !== -1 && cols[colIdx.finInstrmId]) ? cols[colIdx.finInstrmId].trim() : '';
 
@@ -288,6 +350,7 @@ var DataProvider = {
       if (!expiryDate) continue;
       var expiryKey = Utils.formatDateKey(expiryDate);
 
+      // Official ClsPric policy: closing price only. Never substitute SttlmPric.
       var rawClose = Utils.safeFloat(cols[colIdx.clsPric]);
       var closePrice = (rawClose !== null && rawClose > 0) ? rawClose : null;
       var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
@@ -313,6 +376,13 @@ var DataProvider = {
         priceSource: closePrice !== null ? 'ClsPric' : (settlePrice !== null ? 'SttlmPric_Only' : 'NONE'),
         underlyingPrice: undrlygPrice
       });
+      validRecords++;
+    }
+
+    // If expectedDateKey was specified and multiple rows exist, ensure date matched at least once
+    if (expectedDateKey && lines.length > 5 && matchedDateCount === 0) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'UDiFF CSV date validation failed: 0 records matched expected date ' + expectedDateKey);
+      return null;
     }
 
     return result;
@@ -344,36 +414,55 @@ var DataProvider = {
     return { status: this.STATUS.SUCCESS, data: parsed, error: null };
   },
 
-  parseLegacyFOCsv: function(csvText, dateKey) {
+  /**
+   * Parses official NSE Legacy FO Bhavcopy CSV text with robust quoted-field parsing,
+   * header validation, and date matching.
+   */
+  parseLegacyFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
     var lines = csvText.split(/\r?\n/);
     if (lines.length < 2) return null;
 
-    var headerLine = lines[0].trim();
-    var headers = headerLine.split(',').map(function(h) { return h.trim(); });
+    var headers = this.parseCsvLine(lines[0]);
 
     var colIdx = {
       instrument: headers.indexOf('INSTRUMENT'),
       symbol: headers.indexOf('SYMBOL'),
       expiryDt: headers.indexOf('EXPIRY_DT'),
       close: headers.indexOf('CLOSE'),
-      settlePr: headers.indexOf('SETTLE_PR')
+      settlePr: headers.indexOf('SETTLE_PR'),
+      timestamp: headers.indexOf('TIMESTAMP')
     };
 
-    if (colIdx.symbol === -1 || colIdx.expiryDt === -1) {
+    // Strict header validation for legacy FO Bhavcopy
+    if (colIdx.instrument === -1 || colIdx.symbol === -1 || colIdx.expiryDt === -1 || colIdx.close === -1) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV header missing mandatory columns');
       return null;
     }
 
     var result = {
-      dateStr: dateKey,
+      dateStr: expectedDateKey,
       isTradingDay: true,
       symbolsData: {}
     };
 
+    var matchedDateCount = 0;
+
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      var cols = line.split(',');
+      var cols = this.parseCsvLine(line);
+      if (cols.length <= colIdx.symbol) continue;
+
+      if (expectedDateKey && colIdx.timestamp !== -1 && cols[colIdx.timestamp]) {
+        var rowDt = Utils.parseDate(cols[colIdx.timestamp]);
+        if (rowDt) {
+          var rowKey = Utils.formatDateKey(rowDt);
+          if (rowKey === expectedDateKey) {
+            matchedDateCount++;
+          }
+        }
+      }
 
       var inst = (cols[colIdx.instrument] || '').trim().toUpperCase();
       if (inst !== 'FUTSTK') {
@@ -389,8 +478,7 @@ var DataProvider = {
       var expiryKey = Utils.formatDateKey(expiryDate);
 
       // In legacy bhavcopy, official FinInstrmNm is not provided.
-      // Do NOT synthesize fake identifiers (e.g. inst + '_' + symbol + '_' + expiry).
-      // Mark contractSymbol as '' (MISSING). ContractMapper will mark mapping as INCOMPLETE.
+      // Do NOT synthesize fake identifiers. Mark contractSymbol as '' (MISSING).
       var contractSymbol = '';
 
       var rawClose = Utils.safeFloat(cols[colIdx.close]);
@@ -405,7 +493,7 @@ var DataProvider = {
       }
 
       result.symbolsData[symbol].contracts.push({
-        contractSymbol: contractSymbol, // MISSING for legacy format
+        contractSymbol: contractSymbol,
         instrumentId: '',
         expiryStr: expiryKey,
         expiryDate: expiryDate,
@@ -414,6 +502,11 @@ var DataProvider = {
         priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null
       });
+    }
+
+    if (expectedDateKey && colIdx.timestamp !== -1 && lines.length > 5 && matchedDateCount === 0) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV date validation failed: 0 records matched ' + expectedDateKey);
+      return null;
     }
 
     return result;
@@ -464,7 +557,7 @@ var DataProvider = {
     var lines = cmText.split(/\r?\n/);
     if (lines.length < 2) return;
 
-    var headers = lines[0].split(',').map(function(h) { return h.trim().toUpperCase(); });
+    var headers = this.parseCsvLine(lines[0]).map(function(h) { return h.toUpperCase(); });
     var symIdx = headers.indexOf('SYMBOL');
     var seriesIdx = headers.indexOf('SERIES');
     var closeIdx = headers.indexOf('CLOSE_PRICE');
@@ -479,7 +572,7 @@ var DataProvider = {
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      var cols = line.split(',').map(function(c) { return c.trim(); });
+      var cols = this.parseCsvLine(line);
       var sym = (cols[symIdx] || '').toUpperCase();
       var series = (seriesIdx !== -1 && cols[seriesIdx]) ? cols[seriesIdx].toUpperCase() : 'EQ';
 
@@ -496,7 +589,7 @@ var DataProvider = {
     var lines = cmText.split(/\r?\n/);
     if (lines.length < 2) return;
 
-    var headers = lines[0].split(',').map(function(h) { return h.trim().toUpperCase(); });
+    var headers = this.parseCsvLine(lines[0]).map(function(h) { return h.toUpperCase(); });
     var symIdx = headers.indexOf('SYMBOL');
     var seriesIdx = headers.indexOf('SERIES');
     var closeIdx = headers.indexOf('CLOSE');
@@ -511,7 +604,7 @@ var DataProvider = {
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      var cols = line.split(',').map(function(c) { return c.trim(); });
+      var cols = this.parseCsvLine(line);
       var sym = (cols[symIdx] || '').toUpperCase();
       var series = (seriesIdx !== -1 && cols[seriesIdx]) ? cols[seriesIdx].toUpperCase() : 'EQ';
 

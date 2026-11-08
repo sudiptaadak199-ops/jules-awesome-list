@@ -9,11 +9,14 @@
  *    - Never hardcodes or logs API_TOKEN. Enforces HTTPS on WORKER_URL.
  *    - If Worker returns HTTP 200 but ZIP extraction, CSV validation, or parsing fails, falls back to official archives.
  * 2. Robust & Strict RFC-4180 CSV Parsing:
+ *    - Handles UTF-8 BOM (\uFEFF) in headers.
  *    - Custom RFC-4180 parser rejecting unmatched quotes, malformed quoted fields, and invalid characters after closing quotes.
+ *    - Enforces row column counts against header definitions, rejecting truncated rows.
  * 3. Strict CSV Header & Trading Date Validation:
- *    - Validates required headers before parsing (rejects malformed or truncated Bhavcopies).
- *    - Validates trading date (TradDt / TIMESTAMP) against expected date regardless of file size.
- *    - Rejects CSVs containing zero matched trading dates or zero valid stock-futures records.
+ *    - Legacy FO: Requires TIMESTAMP column when expectedDateKey is supplied. Never bypasses date validation.
+ *    - CM Spot: When DATE1 or TIMESTAMP exists, rejects rows with missing/invalid/mismatched dates. Never applies unverified spot prices.
+ *    - UDiFF Futures: Valid records strictly require non-empty FinInstrmNm, valid expiry, valid symbol, and positive ClsPric.
+ *      Missing or invalid ClsPric is never counted as a valid record and SttlmPric is never substituted.
  * 4. Multi-Tier Archive Fallback:
  *    - If primary official archive returns HTTP 200 but CSV is invalid/unparseable, automatically attempts alternate official archive.
  * 5. Free Official Sources Only:
@@ -49,10 +52,14 @@ var DataProvider = {
   /**
    * Strict RFC-4180 compliant CSV line parser.
    * Handles commas within quotes, escaped double quotes (""), and trims outer whitespace.
+   * Strips UTF-8 BOM (\uFEFF) if present.
    * Returns null if line is malformed (unmatched quotes, invalid characters after closing quotes, etc.).
    */
   parseCsvLine: function(line) {
     if (line === null || line === undefined) return null;
+    if (line.charCodeAt(0) === 0xFEFF) {
+      line = line.substring(1);
+    }
     var len = line.length;
     var fields = [];
     var i = 0;
@@ -346,7 +353,8 @@ var DataProvider = {
   /**
    * Parses official NSE UDiFF FO Bhavcopy CSV text with robust quoted-field parsing,
    * strict header validation, trading date matching, and strict ClsPric policy.
-   * Requires at least one valid stock-futures record before returning valid result.
+   * Counts valid records ONLY when genuine FinInstrmNm, valid expiry, valid symbol,
+   * and positive ClsPric are present. Never substitutes SttlmPric.
    */
   parseUdiffFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
@@ -355,6 +363,7 @@ var DataProvider = {
 
     var headers = this.parseCsvLine(lines[0]);
     if (!headers || headers.length === 0) return null;
+    var expectedColCount = headers.length;
 
     var colIdx = {
       tradDt: headers.indexOf('TradDt'),
@@ -389,7 +398,8 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      if (!cols || cols.length <= colIdx.tckrSymb) continue;
+      // Enforce row column count consistency against headers
+      if (!cols || cols.length < expectedColCount) continue;
 
       // Trading date validation: verify file contains data matching the expected date
       if (expectedDateKey && colIdx.tradDt !== -1) {
@@ -452,7 +462,11 @@ var DataProvider = {
         priceSource: closePrice !== null ? 'ClsPric' : (settlePrice !== null ? 'SttlmPric_Only' : 'NONE'),
         underlyingPrice: undrlygPrice
       });
-      validRecords++;
+
+      // Valid record criterion: genuine FinInstrmNm, valid expiry, valid symbol, and positive ClsPric
+      if (closePrice !== null && closePrice > 0) {
+        validRecords++;
+      }
     }
 
     // Strict trading date validation: if expectedDateKey specified, reject if 0 matched records regardless of line count
@@ -461,9 +475,9 @@ var DataProvider = {
       return null;
     }
 
-    // Require at least one valid stock-futures record before returning SUCCESS
+    // Require at least one valid stock-futures record with positive ClsPric before returning SUCCESS
     if (validRecords === 0) {
-      SheetManager.log('WARN', 'CSV_PARSE', 'UDiFF CSV contains zero valid stock-futures records');
+      SheetManager.log('WARN', 'CSV_PARSE', 'UDiFF CSV contains zero valid stock-futures records with positive closing price');
       return null;
     }
 
@@ -499,6 +513,7 @@ var DataProvider = {
   /**
    * Parses official NSE Legacy FO Bhavcopy CSV text with robust quoted-field parsing,
    * header validation, strict date matching, and requiring at least 1 valid stock-futures record.
+   * Requires TIMESTAMP column when expectedDateKey is supplied. Never bypasses date validation.
    */
   parseLegacyFOCsv: function(csvText, expectedDateKey) {
     if (!csvText) return null;
@@ -507,6 +522,7 @@ var DataProvider = {
 
     var headers = this.parseCsvLine(lines[0]);
     if (!headers || headers.length === 0) return null;
+    var expectedColCount = headers.length;
 
     var colIdx = {
       instrument: headers.indexOf('INSTRUMENT'),
@@ -523,6 +539,12 @@ var DataProvider = {
       return null;
     }
 
+    // Require TIMESTAMP column when expectedDateKey is supplied. Never bypass date validation.
+    if (expectedDateKey && colIdx.timestamp === -1) {
+      SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV missing required TIMESTAMP column for date validation');
+      return null;
+    }
+
     var result = {
       dateStr: expectedDateKey,
       isTradingDay: true,
@@ -536,10 +558,13 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      if (!cols || cols.length <= colIdx.symbol) continue;
+      // Enforce row column count consistency against headers
+      if (!cols || cols.length < expectedColCount) continue;
 
-      if (expectedDateKey && colIdx.timestamp !== -1 && cols[colIdx.timestamp]) {
-        var rowDt = Utils.parseDate(cols[colIdx.timestamp]);
+      if (expectedDateKey && colIdx.timestamp !== -1) {
+        var rawTs = cols[colIdx.timestamp];
+        if (!rawTs) continue;
+        var rowDt = Utils.parseDate(rawTs);
         if (!rowDt) {
           continue;
         }
@@ -588,10 +613,13 @@ var DataProvider = {
         priceSource: closePrice !== null ? 'CLOSE' : 'NONE',
         underlyingPrice: null
       });
-      validRecords++;
+
+      if (closePrice !== null && closePrice > 0) {
+        validRecords++;
+      }
     }
 
-    if (expectedDateKey && colIdx.timestamp !== -1 && matchedDateCount === 0) {
+    if (expectedDateKey && matchedDateCount === 0) {
       SheetManager.log('WARN', 'CSV_PARSE', 'Legacy FO CSV date validation failed: 0 records matched ' + expectedDateKey);
       return null;
     }
@@ -652,6 +680,11 @@ var DataProvider = {
     }
   },
 
+  /**
+   * Parse and apply spot prices from official CM sec_bhavdata_full CSV.
+   * When DATE1 exists, strictly rejects rows with missing, invalid, or mismatched dates.
+   * Never applies spot prices from an unverified date.
+   */
   _parseAndApplySpotFromCmSec: function(cmText, parsedData, targetSymbols, expectedDateKey) {
     if (!cmText) return 0;
     var lines = cmText.split(/\r?\n/);
@@ -659,6 +692,7 @@ var DataProvider = {
 
     var rawHeaders = this.parseCsvLine(lines[0]);
     if (!rawHeaders || rawHeaders.length === 0) return 0;
+    var expectedColCount = rawHeaders.length;
     var headers = rawHeaders.map(function(h) { return h.toUpperCase(); });
 
     var symIdx = headers.indexOf('SYMBOL');
@@ -679,12 +713,17 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      if (!cols || cols.length <= symIdx) continue;
+      // Enforce row column count consistency against headers
+      if (!cols || cols.length < expectedColCount) continue;
 
-      if (expectedDateKey && dateIdx !== -1 && cols[dateIdx]) {
-        var rowDt = Utils.parseDate(cols[dateIdx]);
-        if (rowDt && Utils.formatDateKey(rowDt) !== expectedDateKey) {
-          continue;
+      // When DATE1 exists, reject rows with missing, invalid, or mismatched dates
+      if (dateIdx !== -1) {
+        var rawDate = cols[dateIdx];
+        if (!rawDate) continue; // reject missing date
+        var rowDt = Utils.parseDate(rawDate);
+        if (!rowDt) continue; // reject invalid date
+        if (expectedDateKey && Utils.formatDateKey(rowDt) !== expectedDateKey) {
+          continue; // reject mismatched date
         }
       }
 
@@ -703,6 +742,11 @@ var DataProvider = {
     return applied;
   },
 
+  /**
+   * Parse and apply spot prices from official legacy CM Bhavcopy CSV.
+   * When TIMESTAMP exists, strictly rejects rows with missing, invalid, or mismatched dates.
+   * Never applies spot prices from an unverified date.
+   */
   _parseAndApplySpotFromLegacyCm: function(cmText, parsedData, targetSymbols, expectedDateKey) {
     if (!cmText) return 0;
     var lines = cmText.split(/\r?\n/);
@@ -710,6 +754,7 @@ var DataProvider = {
 
     var rawHeaders = this.parseCsvLine(lines[0]);
     if (!rawHeaders || rawHeaders.length === 0) return 0;
+    var expectedColCount = rawHeaders.length;
     var headers = rawHeaders.map(function(h) { return h.toUpperCase(); });
 
     var symIdx = headers.indexOf('SYMBOL');
@@ -730,12 +775,17 @@ var DataProvider = {
       var line = lines[i].trim();
       if (!line) continue;
       var cols = this.parseCsvLine(line);
-      if (!cols || cols.length <= symIdx) continue;
+      // Enforce row column count consistency against headers
+      if (!cols || cols.length < expectedColCount) continue;
 
-      if (expectedDateKey && tsIdx !== -1 && cols[tsIdx]) {
-        var rowDt = Utils.parseDate(cols[tsIdx]);
-        if (rowDt && Utils.formatDateKey(rowDt) !== expectedDateKey) {
-          continue;
+      // When TIMESTAMP exists, reject rows with missing, invalid, or mismatched dates
+      if (tsIdx !== -1) {
+        var rawTs = cols[tsIdx];
+        if (!rawTs) continue; // reject missing date
+        var rowDt = Utils.parseDate(rawTs);
+        if (!rowDt) continue; // reject invalid date
+        if (expectedDateKey && Utils.formatDateKey(rowDt) !== expectedDateKey) {
+          continue; // reject mismatched date
         }
       }
 

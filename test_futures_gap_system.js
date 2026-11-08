@@ -194,8 +194,10 @@ runTest('DataProvider.parseUdiffFOCsv rejects records with blank contract identi
 runTest('Missing ClsPric never uses SttlmPric in DataProvider', () => {
   const missingCloseCsv = `TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
 2026-05-04,2026-05-04,FO,NSE,STF,1001,,RELIANCE,,2026-05-26,2026-05-26,0.00,XX,RELIANCE26MAYFUT,1460.00,1470.00,1458.00,,1467.00,1460.00,1463.10,1467.00,10000,0,500,600000.00,10,F1,250,,,,,
+2026-05-04,2026-05-04,FO,NSE,STF,1003,,TCS,,2026-05-26,2026-05-26,0.00,XX,TCS26MAYFUT,3900.00,3920.00,3890.00,3910.00,3910.00,3900.00,3905.00,3910.00,5000,0,100,100000.00,5,F1,175,,,,,
 `;
   const parsed = DataProvider.parseUdiffFOCsv(missingCloseCsv, '2026-05-04');
+  assert(parsed !== null, 'CSV should parse since TCS has valid positive ClsPric');
   assert(parsed.symbolsData.RELIANCE);
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].closePrice, null, 'closePrice must be null if ClsPric is blank');
   assert.strictEqual(parsed.symbolsData.RELIANCE.contracts[0].priceSource, 'SttlmPric_Only');
@@ -962,6 +964,70 @@ runTest('DataProvider falls back to alternate archive when primary archive retur
   assert(attemptedUrls.some(u => u.includes('nsearchives.nseindia.com')), 'Primary archive attempted');
   assert(attemptedUrls.some(u => u.includes('archives.nseindia.com')), 'Alternate archive attempted after primary CSV failed');
   assert.strictEqual(res.data.symbolsData.RELIANCE.contracts[0].contractSymbol, 'RELIANCE26NOVFUT');
+});
+
+// 36. UTF-8 BOM is stripped cleanly and does not corrupt first header column
+runTest('DataProvider.parseCsvLine strips UTF-8 BOM cleanly', () => {
+  const lineWithBom = '\uFEFFTradDt,TckrSymb,FinInstrmTp\n';
+  const fields = DataProvider.parseCsvLine(lineWithBom.trim());
+  assert.strictEqual(fields[0], 'TradDt', 'First field must be TradDt without BOM prefix');
+  assert.strictEqual(fields[1], 'TckrSymb');
+});
+
+// 37. Truncated rows with column counts less than header definition are rejected
+runTest('DataProvider parsers reject truncated rows with fewer columns than header', () => {
+  const headers = 'TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt';
+  // Truncated row: only 3 columns instead of 7
+  const truncatedCsv = `${headers}\n2026-05-04,RELIANCE,STF\n2026-05-04,TCS,STF,TCS26MAYFUT,3900.00,3890.00,2026-05-26\n`;
+  const parsed = DataProvider.parseUdiffFOCsv(truncatedCsv, '2026-05-04');
+  assert(parsed !== null);
+  assert.strictEqual(parsed.symbolsData.RELIANCE, undefined, 'Truncated RELIANCE row must be discarded');
+  assert(parsed.symbolsData.TCS !== undefined, 'Complete TCS row must be parsed');
+});
+
+// 38. Legacy FO requires TIMESTAMP column when expectedDateKey is supplied
+runTest('DataProvider.parseLegacyFOCsv rejects CSV when TIMESTAMP column is missing', () => {
+  // Legacy CSV without TIMESTAMP header
+  const noTsCsv = `INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI
+FUTSTK,RELIANCE,30-May-2024,0,XX,2971,2984.45,2959.55,2969.5,2969.5,21811,161968.04,34923000,-649750
+`;
+  const parsed = DataProvider.parseLegacyFOCsv(noTsCsv, '2024-05-24');
+  assert.strictEqual(parsed, null, 'Must reject legacy CSV missing TIMESTAMP column when expectedDateKey is provided');
+});
+
+// 39. CM Spot rejects rows with missing, invalid, or mismatched DATE1 or TIMESTAMP
+runTest('DataProvider CM spot parser rejects unverified dates', () => {
+  const cmCsv = `SYMBOL,SERIES,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,CLOSE_PRICE,PREV_CLOSE,TTL_TRD_QNTY,TTL_TRD_VAL,DATE1
+RELIANCE,EQ,1460,1470,1455,1465.50,1460,1000,1465500,04-MAY-2026
+TCS,EQ,3900,3920,3890,3910.00,3900,1000,3910000,01-MAY-2026
+INFY,EQ,1500,1520,1490,1510.00,1500,1000,1510000,
+WIPRO,EQ,450,455,448,452.00,450,1000,452000,INVALID_DATE
+`;
+  const parsedData = {
+    symbolsData: {
+      RELIANCE: { spotPrice: null },
+      TCS: { spotPrice: null },
+      INFY: { spotPrice: null },
+      WIPRO: { spotPrice: null }
+    }
+  };
+
+  const count = DataProvider._parseAndApplySpotFromCmSec(cmCsv, parsedData, ['RELIANCE', 'TCS', 'INFY', 'WIPRO'], '2026-05-04');
+  assert.strictEqual(count, 1, 'Only RELIANCE matching 2026-05-04 should be applied');
+  assert.strictEqual(parsedData.symbolsData.RELIANCE.spotPrice, 1465.50);
+  assert.strictEqual(parsedData.symbolsData.TCS.spotPrice, null, 'TCS mismatched date must be rejected');
+  assert.strictEqual(parsedData.symbolsData.INFY.spotPrice, null, 'INFY missing date must be rejected');
+  assert.strictEqual(parsedData.symbolsData.WIPRO.spotPrice, null, 'WIPRO invalid date must be rejected');
+});
+
+// 40. UDiFF Futures valid records strictly require positive ClsPric (missing ClsPric does not count)
+runTest('DataProvider.parseUdiffFOCsv valid records count requires positive ClsPric', () => {
+  // CSV where the only stock futures record has blank ClsPric
+  const blankClsPricCsv = `TradDt,TckrSymb,FinInstrmTp,FinInstrmNm,ClsPric,UndrlygPric,XpryDt
+2026-05-04,RELIANCE,STF,RELIANCE26MAYFUT,,1463.10,2026-05-26
+`;
+  const parsed = DataProvider.parseUdiffFOCsv(blankClsPricCsv, '2026-05-04');
+  assert.strictEqual(parsed, null, 'CSV with zero positive ClsPric records must not return SUCCESS');
 });
 
 console.log(`\n==========================================`);

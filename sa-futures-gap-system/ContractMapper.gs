@@ -126,12 +126,19 @@ var ContractMapper = {
     var curContractSymbol = current ? current.contractSymbol : null;
     var nextContractSymbol = next ? next.contractSymbol : null;
 
-    var resolvedSpot = (stockData.spotPrice !== null && stockData.spotPrice !== undefined && stockData.spotPrice > 0)
+    // Strict Cash Market Spot policy:
+    // Only genuine official NSE Cash Market closing price (stockData.spotPrice) from CM Bhavcopy is accepted.
+    // Never silently substitute Futures UndrlygPric as verified Spot price!
+    var verifiedSpot = (stockData.spotPrice !== null && stockData.spotPrice !== undefined && stockData.spotPrice > 0)
       ? stockData.spotPrice
+      : null;
+
+    var diagnosticUnderlying = (stockData.underlyingPrice !== null && stockData.underlyingPrice !== undefined && stockData.underlyingPrice > 0)
+      ? stockData.underlyingPrice
       : (current && current.underlyingPrice !== null && current.underlyingPrice > 0 ? current.underlyingPrice : null);
 
     // Completeness validation:
-    var isComplete = (resolvedSpot !== null && resolvedSpot > 0) &&
+    var isComplete = (verifiedSpot !== null && verifiedSpot > 0) &&
                      (current !== null && current.closePrice > 0 && curContractSymbol) &&
                      (next !== null && next.closePrice > 0 && nextContractSymbol) &&
                      (histExpiryDate !== null && nextExpiryDate !== null && histExpiryDate !== nextExpiryDate);
@@ -141,7 +148,8 @@ var ContractMapper = {
     return {
       currentContract: current,
       nextContract: next,
-      spotPrice: resolvedSpot,
+      spotPrice: verifiedSpot,
+      underlyingPrice: diagnosticUnderlying, // Preserved separately as diagnostic data
       historicalExpiryDate: histExpiryDate,
       nextExpiryDate: nextExpiryDate,
       currentContractSymbol: curContractSymbol,

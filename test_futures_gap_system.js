@@ -1298,6 +1298,40 @@ runTest('DataProvider circuit breaker tracks failure counts strictly by target h
   }
 });
 
+// 51. Strict Cash Spot: Missing official CM Spot keeps record INCOMPLETE even if UndrlygPric exists
+runTest('ContractMapper preserves UndrlygPric as diagnostic data and keeps record INCOMPLETE when CM Spot is missing', () => {
+  const stockData = {
+    spotPrice: null, // CM Spot missing
+    underlyingPrice: 1463.10, // UndrlygPric from FO Bhavcopy
+    contracts: [
+      { contractSymbol: 'RELIANCE26MAYFUT', expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 1467.00, underlyingPrice: 1463.10 },
+      { contractSymbol: 'RELIANCE26JUNFUT', expiryStr: '2026-06-30', expiryDate: new Date('2026-06-30'), closePrice: 1476.30, underlyingPrice: 1463.10 }
+    ]
+  };
+
+  const mapped = ContractMapper.mapContractsForDate(new Date('2026-05-04'), stockData);
+  assert.strictEqual(mapped.mappingStatus, 'INCOMPLETE', 'Record without verified CM Spot must remain INCOMPLETE');
+  assert.strictEqual(mapped.spotPrice, null, 'spotPrice must be null, not substituted with UndrlygPric');
+  assert.strictEqual(mapped.underlyingPrice, 1463.10, 'underlyingPrice must be preserved separately as diagnostic info');
+});
+
+// 52. Strict Cash Spot: Verified official CM Spot completes the record
+runTest('ContractMapper marks record COMPLETE when verified CM Spot is provided', () => {
+  const stockData = {
+    spotPrice: 1465.50, // Verified from CM Bhavcopy
+    underlyingPrice: 1463.10,
+    contracts: [
+      { contractSymbol: 'RELIANCE26MAYFUT', expiryStr: '2026-05-26', expiryDate: new Date('2026-05-26'), closePrice: 1467.00 },
+      { contractSymbol: 'RELIANCE26JUNFUT', expiryStr: '2026-06-30', expiryDate: new Date('2026-06-30'), closePrice: 1476.30 }
+    ]
+  };
+
+  const mapped = ContractMapper.mapContractsForDate(new Date('2026-05-04'), stockData);
+  assert.strictEqual(mapped.mappingStatus, 'COMPLETE');
+  assert.strictEqual(mapped.spotPrice, 1465.50);
+  assert.strictEqual(mapped.underlyingPrice, 1463.10);
+});
+
 console.log(`\n==========================================`);
 console.log(`ALL ${passedTests} OF ${totalTests} TESTS PASSED SUCCESSFULLY!`);
 console.log(`==========================================\n`);

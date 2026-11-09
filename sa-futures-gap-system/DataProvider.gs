@@ -459,13 +459,17 @@ var DataProvider = {
       var settlePrice = (colIdx.sttlmPric !== -1) ? Utils.safeFloat(cols[colIdx.sttlmPric]) : null;
       var undrlygPrice = (colIdx.undrlygPric !== -1) ? Utils.safeFloat(cols[colIdx.undrlygPric]) : null;
 
+      // Strict Official Cash Spot Price Policy:
+      // spotPrice remains null until verified from official Cash Market Bhavcopy (_enrichSpotPrices).
+      // undrlygPrice is stored separately as diagnostic data only, never as verified spotPrice.
       if (!result.symbolsData[symbol]) {
         result.symbolsData[symbol] = {
-          spotPrice: undrlygPrice,
+          spotPrice: null, // Strict: populated strictly from official Cash Market Bhavcopy
+          underlyingPrice: undrlygPrice, // Diagnostic only
           contracts: []
         };
-      } else if (undrlygPrice !== null && result.symbolsData[symbol].spotPrice === null) {
-        result.symbolsData[symbol].spotPrice = undrlygPrice;
+      } else if (undrlygPrice !== null && !result.symbolsData[symbol].underlyingPrice) {
+        result.symbolsData[symbol].underlyingPrice = undrlygPrice;
       }
 
       result.symbolsData[symbol].contracts.push({

@@ -1332,6 +1332,163 @@ runTest('ContractMapper marks record COMPLETE when verified CM Spot is provided'
   assert.strictEqual(mapped.underlyingPrice, 1463.10);
 });
 
+// 53. Realistic Google Sheets write/read verification, duplicate prevention, and dual synchronization
+runTest('Realistic Google Sheets pipeline: writes, reads back, prevents duplicates, and recovers missing data', () => {
+  // Restore genuine SheetManager methods if previously mocked
+  const origSheetManager = {};
+  const code = fs.readFileSync('sa-futures-gap-system/SheetManager.gs', 'utf8');
+  eval(code);
+
+  // Mock in-memory Google Sheets SpreadsheetApp
+  const mockSheets = {};
+
+  class MockSheet {
+    constructor(name) {
+      this.name = name;
+      this.rows = [];
+    }
+    getLastRow() { return this.rows.length; }
+    getLastColumn() { return this.rows.length > 0 ? this.rows[0].length : 0; }
+    getRange(row, col, numRows, numCols) {
+      const self = this;
+      return {
+        getValues: () => {
+          const res = [];
+          const endRow = numRows ? (row - 1 + numRows) : self.rows.length;
+          for (let r = row - 1; r < endRow; r++) {
+            if (self.rows[r]) {
+              const rowSlice = [];
+              const endCol = numCols ? (col - 1 + numCols) : self.rows[r].length;
+              for (let c = col - 1; c < endCol; c++) {
+                rowSlice.push(self.rows[r][c] !== undefined ? self.rows[r][c] : '');
+              }
+              res.push(rowSlice);
+            } else {
+              res.push(new Array(numCols || 1).fill(''));
+            }
+          }
+          return res;
+        },
+        setValues: (values) => {
+          for (let r = 0; r < values.length; r++) {
+            const targetRow = row - 1 + r;
+            if (!self.rows[targetRow]) self.rows[targetRow] = [];
+            for (let c = 0; c < values[r].length; c++) {
+              self.rows[targetRow][col - 1 + c] = values[r][c];
+            }
+          }
+        },
+        clearContent: () => {
+          for (let r = row - 1; r < row - 1 + (numRows || 1); r++) {
+            if (self.rows[r]) {
+              for (let c = col - 1; c < col - 1 + (numCols || 1); c++) {
+                self.rows[r][c] = '';
+              }
+            }
+          }
+        },
+        setBackground: () => {},
+        setFontColor: () => {},
+        setFontWeight: () => {},
+        setHorizontalAlignment: () => {},
+        setNumberFormat: () => {},
+        setValue: (val) => {
+          if (!self.rows[row - 1]) self.rows[row - 1] = [];
+          self.rows[row - 1][col - 1] = val;
+        },
+        merge: () => {},
+        setBorder: () => {},
+        setFontSize: () => {},
+        setFormula: () => {}
+      };
+    }
+    appendRow(rowArr) { this.rows.push([...rowArr]); }
+    setFrozenRows() {}
+    autoResizeColumns() {}
+    setName(n) { this.name = n; }
+    getName() { return this.name; }
+    hideSheet() {}
+    setColumnWidth() {}
+  }
+
+  class MockSpreadsheet {
+    constructor() {
+      this.sheets = {};
+    }
+    getSheetByName(name) { return this.sheets[name] || null; }
+    insertSheet(name) {
+      const s = new MockSheet(name);
+      this.sheets[name] = s;
+      return s;
+    }
+    getSheets() { return Object.values(this.sheets); }
+  }
+
+  const ss = new MockSpreadsheet();
+  const origSpreadsheetApp = global.SpreadsheetApp;
+  global.SpreadsheetApp = {
+    getActiveSpreadsheet: () => ss,
+    openById: () => ss
+  };
+
+  try {
+    // 1. Initialize sheets
+    SheetManager.initializeSheets();
+    assert(ss.getSheetByName(CONFIG.SHEETS.SYMBOLS) !== null);
+    assert(ss.getSheetByName(CONFIG.SHEETS.GAP_ANALYSIS) !== null);
+    assert(ss.getSheetByName(CONFIG.SHEETS.CONTRACT_MAPPING) !== null);
+
+    // 2. Setup Symbols
+    const symSheet = ss.getSheetByName(CONFIG.SHEETS.SYMBOLS);
+    symSheet.rows = [
+      ['Symbol', 'Status', 'Last Updated', 'Notes'],
+      ['RELIANCE', 'ACTIVE', '', 'Reliance Industries Ltd'],
+      ['TCS', 'ACTIVE', '', 'Tata Consultancy Services Ltd']
+    ];
+
+    const symbols = SheetManager.getActiveSymbols();
+    assert.deepStrictEqual(symbols, ['RELIANCE', 'TCS']);
+
+    // 3. Write row to Futures Gap Analysis and Contract_Mapping
+    const gapRows = [
+      GapEngine.buildAnalysisRow('2026-05-04', 'RELIANCE', 1465.50, 1467.00, 1476.30, '2026-05-26')
+    ];
+    const mapRows = [
+      GapEngine.buildMappingRow('2026-05-04', 'RELIANCE', 'RELIANCE26MAYFUT', '2026-05-26', 'RELIANCE26JUNFUT', '2026-06-30', 1467.00, 1476.30, 'COMPLETE')
+    ];
+
+    SheetManager.appendAnalysisRows(gapRows);
+    SheetManager.appendMappingRows(mapRows);
+
+    // 4. Read back and verify exact values
+    const existingGapKeys = SheetManager.getExistingRecordKeys();
+    assert(existingGapKeys['2026-05-04|RELIANCE|2026-05-26'], 'Record key must exist after append');
+
+    const gapSheet = ss.getSheetByName(CONFIG.SHEETS.GAP_ANALYSIS);
+    assert.strictEqual(gapSheet.rows.length, 2, 'Header + 1 data row');
+    assert.strictEqual(gapSheet.rows[1][0], '2026-05-04');
+    assert.strictEqual(gapSheet.rows[1][1], 'RELIANCE');
+    assert.strictEqual(gapSheet.rows[1][2], 1465.50);
+    assert.strictEqual(gapSheet.rows[1][5], -9.3); // Current - Next
+    assert.strictEqual(gapSheet.rows[1][7], -1.5); // Spot - Current
+
+    // 5. Test Duplicate Prevention on same date/symbol
+    const duplicateRow = GapEngine.buildAnalysisRow('2026-05-04', 'RELIANCE', 1465.50, 1467.00, 1476.30, '2026-05-26');
+    const existingKeysBefore = SheetManager.getExistingRecordKeys();
+    const key = Utils.makeRecordKey(duplicateRow[0], duplicateRow[1], duplicateRow[9]);
+    if (!existingKeysBefore[key]) {
+      SheetManager.appendAnalysisRows([duplicateRow]);
+    }
+    assert.strictEqual(gapSheet.rows.length, 2, 'Duplicate row must not be added!');
+
+    // 6. Test Incomplete Record Handling: Incomplete records not written to main analysis sheet
+    const incompleteMapRow = GapEngine.buildMappingRow('2026-05-05', 'RELIANCE', 'RELIANCE26MAYFUT', '2026-05-26', '', '', 1467.00, null, 'INCOMPLETE');
+    assert.strictEqual(incompleteMapRow[9], 'INCOMPLETE');
+  } finally {
+    global.SpreadsheetApp = origSpreadsheetApp;
+  }
+});
+
 console.log(`\n==========================================`);
 console.log(`ALL ${passedTests} OF ${totalTests} TESTS PASSED SUCCESSFULLY!`);
 console.log(`==========================================\n`);

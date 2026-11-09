@@ -11,45 +11,53 @@
   "total_weekdays_evaluated": 133,
   "confirmed_holidays_count": 5,
   "expected_trading_days_count": 128,
-  "downloaded_archives_count": 128,
-  "unavailable_archive_dates_count": 0,
+  "downloaded_fo_archives_count": 128,
+  "failed_fo_archive_dates_count": 0,
   "total_potential_symbol_records": 640,
   "complete_records_count": 640,
   "incomplete_records_count": 0,
-  "failed_records_count": 0,
+  "missing_cash_spot_count": 0,
+  "missing_futures_contracts_count": 0,
   "historical_coverage_percentage": 100,
-  "price_field_used": "ClsPric",
+  "spot_source": "Official NSE CM Bhavcopy (sec_bhavdata_full)",
+  "futures_price_source": "ClsPric",
+  "undrlyg_pric_as_spot_used": false,
   "settlement_fallback_used": false,
   "synthetic_symbol_generation_used": false,
   "symbol_breakdown": {
     "RELIANCE": {
       "complete": 128,
       "incomplete": 0,
-      "failed": 0,
+      "missing_cash_spot": 0,
+      "missing_futures": 0,
       "coverage_percentage": 100
     },
     "TCS": {
       "complete": 128,
       "incomplete": 0,
-      "failed": 0,
+      "missing_cash_spot": 0,
+      "missing_futures": 0,
       "coverage_percentage": 100
     },
     "INFY": {
       "complete": 128,
       "incomplete": 0,
-      "failed": 0,
+      "missing_cash_spot": 0,
+      "missing_futures": 0,
       "coverage_percentage": 100
     },
     "HDFCBANK": {
       "complete": 128,
       "incomplete": 0,
-      "failed": 0,
+      "missing_cash_spot": 0,
+      "missing_futures": 0,
       "coverage_percentage": 100
     },
     "ICICIBANK": {
       "complete": 128,
       "incomplete": 0,
-      "failed": 0,
+      "missing_cash_spot": 0,
+      "missing_futures": 0,
       "coverage_percentage": 100
     }
   },
@@ -75,5 +83,5 @@
       "description": "Dussehra"
     }
   ],
-  "unavailable_archive_dates_list": []
+  "failed_dates_list": []
 }

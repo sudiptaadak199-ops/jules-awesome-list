@@ -1,0 +1,83 @@
+{
+  "startDate": "2026-05-11",
+  "endDate": "2026-11-09",
+  "expectedTradingDays": 131,
+  "downloadedArchives": 125,
+  "failedArchiveDates": [
+    {
+      "date": "2026-05-28",
+      "status": 404
+    },
+    {
+      "date": "2026-06-26",
+      "status": 404
+    },
+    {
+      "date": "2026-09-14",
+      "status": 404
+    },
+    {
+      "date": "2026-10-02",
+      "status": 404
+    },
+    {
+      "date": "2026-10-20",
+      "status": 404
+    },
+    {
+      "date": "2026-11-09",
+      "status": 404
+    }
+  ],
+  "parsedDates": 125,
+  "symbols": [
+    "RELIANCE",
+    "TCS",
+    "INFY",
+    "HDFCBANK",
+    "ICICIBANK"
+  ],
+  "symbolMetrics": {
+    "RELIANCE": {
+      "complete": 125,
+      "incomplete": 6,
+      "missingSpot": 0,
+      "missingFutures": 0,
+      "coveragePct": 95.42
+    },
+    "TCS": {
+      "complete": 125,
+      "incomplete": 6,
+      "missingSpot": 0,
+      "missingFutures": 0,
+      "coveragePct": 95.42
+    },
+    "INFY": {
+      "complete": 125,
+      "incomplete": 6,
+      "missingSpot": 0,
+      "missingFutures": 0,
+      "coveragePct": 95.42
+    },
+    "HDFCBANK": {
+      "complete": 125,
+      "incomplete": 6,
+      "missingSpot": 0,
+      "missingFutures": 0,
+      "coveragePct": 95.42
+    },
+    "ICICIBANK": {
+      "complete": 125,
+      "incomplete": 6,
+      "missingSpot": 0,
+      "missingFutures": 0,
+      "coveragePct": 95.42
+    }
+  },
+  "totalRecordsEvaluated": 655,
+  "completeRecords": 625,
+  "incompleteRecords": 30,
+  "missingSpotCount": 0,
+  "missingFuturesCount": 0,
+  "overallCoveragePct": 95.42
+}
